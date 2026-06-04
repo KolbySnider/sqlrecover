@@ -1,0 +1,9 @@
+build/
+out/
+*.o
+*.db
+*.db-wal
+*.db-shm
+*.img
+*.bin
+__pycache__/

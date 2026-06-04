@@ -1,0 +1,7 @@
+C:/Users/kolby/CLionProjects/sqlrecover/cmake-build-debug-mingw/CMakeFiles/sqlrecover.dir
+C:/Users/kolby/CLionProjects/sqlrecover/cmake-build-debug-mingw/CMakeFiles/edit_cache.dir
+C:/Users/kolby/CLionProjects/sqlrecover/cmake-build-debug-mingw/CMakeFiles/rebuild_cache.dir
+C:/Users/kolby/CLionProjects/sqlrecover/cmake-build-debug-mingw/CMakeFiles/list_install_components.dir
+C:/Users/kolby/CLionProjects/sqlrecover/cmake-build-debug-mingw/CMakeFiles/install.dir
+C:/Users/kolby/CLionProjects/sqlrecover/cmake-build-debug-mingw/CMakeFiles/install/local.dir
+C:/Users/kolby/CLionProjects/sqlrecover/cmake-build-debug-mingw/CMakeFiles/install/strip.dir

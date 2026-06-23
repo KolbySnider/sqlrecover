@@ -22,48 +22,111 @@ uint32_t header_page_size(const uint8_t* p, size_t avail) {
     return ps;
 }
 
-// Signature carver: scan for the SQLite magic and carve a contiguous run of
-// pages. We size the file from the header's page-count field when it is
-// plausible, else carve a bounded window. This is deliberately conservative;
-// the libtsk path is preferred when available.
-std::vector<std::string> carve_by_signature(const std::vector<uint8_t>& img,
+// Streaming signature carver: scans the image in chunks so arbitrarily large
+// images (e.g. full flash dumps) don't need to fit in RAM.
+//
+// Key design points:
+//   - buf0_file_pos always tracks the absolute file offset of buf[0], so
+//     hit_pos = buf0_file_pos + i is always correct regardless of carry state.
+//   - Each hit is re-read from the source file via a second ifstream so the
+//     main scan stream is never disturbed.
+//   - Hits must be 512-byte aligned; unaligned hits are embedded strings, not
+//     real database headers.
+//   - The OVERLAP carry ensures we never miss a magic that straddles a chunk
+//     boundary.
+std::vector<std::string> carve_by_signature(const std::string& image_path,
                                              const std::string& out_dir,
                                              bool verbose) {
     static const char magic[16] = {'S','Q','L','i','t','e',' ','f',
                                    'o','r','m','a','t',' ','3','\0'};
+
+    std::ifstream f(image_path, std::ios::binary);
+    if (!f) throw ParseError("cannot open image: " + image_path);
+
+    const size_t CHUNK   = 4 * 1024 * 1024;  // 4 MB read window
+    const size_t OVERLAP = 128;               // enough to not miss a straddled header
+
+    std::vector<uint8_t> buf(CHUNK + OVERLAP);
     std::vector<std::string> out;
-    size_t n = img.size();
-    int idx = 0;
-    for (size_t i = 0; i + 100 < n; ) {
-        if (std::memcmp(img.data() + i, magic, 16) != 0) { ++i; continue; }
-        uint32_t ps = header_page_size(img.data() + i, n - i);
-        if (ps == 0) { ++i; continue; }
 
-        // page-count field at offset 28 (big-endian) within the header.
-        const uint8_t* h = img.data() + i;
-        uint32_t page_count = (uint32_t(h[28]) << 24) | (uint32_t(h[29]) << 16) |
-                              (uint32_t(h[30]) << 8) | h[31];
-        uint64_t span = uint64_t(page_count) * ps;
-        // Guard against absurd/zero sizes: clamp to what's left in the image and
-        // to a sane ceiling (256 MiB).
-        const uint64_t kCeil = 256ull * 1024 * 1024;
-        if (span == 0 || span > kCeil) span = std::min<uint64_t>(kCeil, n - i);
-        if (i + span > n) span = n - i;
+    uint64_t buf0_file_pos = 0;  // absolute file offset of buf[0]
+    size_t   carry         = 0;  // bytes carried over from previous chunk
+    int      idx           = 0;
 
-        std::string path = (fs::path(out_dir) /
-                            ("carved_" + std::to_string(idx++) + ".db")).string();
-        std::ofstream f(path, std::ios::binary);
-        f.write(reinterpret_cast<const char*>(img.data() + i),
-                static_cast<std::streamsize>(span));
-        f.close();
-        if (verbose)
-            std::cerr << "[*] carved " << path << " (" << span
-                      << " bytes, page_size " << ps << ")\n";
-        out.push_back(path);
+    while (true) {
+        // Fill new data after the carry region
+        f.read(reinterpret_cast<char*>(buf.data() + carry), CHUNK);
+        size_t got   = static_cast<size_t>(f.gcount());
+        size_t avail = carry + got;
 
-        // Skip past this database to avoid re-detecting interior pages.
-        i += span;
+        if (avail == 0) break;
+
+        // Scan the buffer for SQLite magic
+        for (size_t i = 0; i + 100 <= avail; ) {
+            if (std::memcmp(buf.data() + i, magic, 16) != 0) { ++i; continue; }
+
+            // Absolute file offset of this candidate header
+            uint64_t hit_pos = buf0_file_pos + i;
+
+            // Real SQLite databases always start on at least a 512-byte boundary
+            // within a filesystem. Unaligned hits are embedded strings — skip them.
+            if (hit_pos % 512 != 0) { ++i; continue; }
+
+            uint32_t ps = header_page_size(buf.data() + i, avail - i);
+            if (ps == 0) { ++i; continue; }
+
+            // Page count from header bytes 28-31 (big-endian)
+            const uint8_t* h = buf.data() + i;
+            uint32_t page_count = (uint32_t(h[28]) << 24) | (uint32_t(h[29]) << 16) |
+                                  (uint32_t(h[30]) << 8)  |  uint32_t(h[31]);
+            uint64_t span = uint64_t(page_count) * ps;
+
+            // Clamp absurd or zero spans to a sane ceiling (256 MiB)
+            const uint64_t kCeil = 256ull * 1024 * 1024;
+            if (span == 0 || span > kCeil) span = kCeil;
+
+            // Extract this database from the source file at the correct offset
+            std::string path = (fs::path(out_dir) /
+                ("carved_" + std::to_string(idx++) + ".db")).string();
+            {
+                std::ifstream src(image_path, std::ios::binary);
+                src.seekg(static_cast<std::streamoff>(hit_pos));
+                std::vector<uint8_t> db_buf(static_cast<size_t>(span));
+                src.read(reinterpret_cast<char*>(db_buf.data()),
+                         static_cast<std::streamsize>(span));
+                size_t actual = static_cast<size_t>(src.gcount());
+                db_buf.resize(actual);
+                std::ofstream o(path, std::ios::binary);
+                o.write(reinterpret_cast<const char*>(db_buf.data()),
+                        static_cast<std::streamsize>(actual));
+                if (verbose)
+                    std::cerr << "[*] carved " << path
+                              << " at offset " << hit_pos
+                              << " (" << actual << " bytes)\n";
+            }
+            out.push_back(path);
+
+            // Skip past this database in the scan buffer
+            size_t skip = static_cast<size_t>(std::min(span, uint64_t(avail - i)));
+            i += (skip > 0 ? skip : 1);
+        }
+
+        // Carry the tail of this chunk into the next iteration so we don't
+        // miss a magic that straddles the boundary
+        if (got == 0) break;  // EOF — we've processed everything
+
+        if (avail > OVERLAP) {
+            size_t consumed  = avail - OVERLAP;
+            buf0_file_pos   += consumed;
+            std::memmove(buf.data(), buf.data() + consumed, OVERLAP);
+            carry = OVERLAP;
+        } else {
+            // Less than OVERLAP bytes total — carry everything
+            buf0_file_pos += 0;  // buf[0] doesn't move
+            carry = avail;
+        }
     }
+
     return out;
 }
 
@@ -98,8 +161,7 @@ std::vector<std::string> carve_databases(const std::string& image_path,
                       << "); falling back to signature carving\n";
     }
 #endif
-    std::vector<uint8_t> img = read_file(image_path);
-    return carve_by_signature(img, out_dir, verbose);
+    return carve_by_signature(image_path, out_dir, verbose);
 }
 
 } // namespace sqlrecover

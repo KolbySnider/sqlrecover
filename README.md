@@ -1,14 +1,13 @@
 # sqlrecover
 
-A command-line forensic tool that recovers **deleted records from SQLite
-databases** — the storage format behind almost all Android application data
-(SMS, contacts, chat apps, browser history, and more).
+A command-line forensic tool that recovers deleted records from SQLite
+databases. SQLite is the storage format behind most Android application data:
+SMS, contacts, chat apps, browser history, and so on.
 
-The SQLite library deliberately hides deleted rows: once a record is removed,
-its bytes usually remain on disk until the space is reused, but the library no
-longer exposes them. `sqlrecover` parses the SQLite file format directly — it
-does **not** link `libsqlite3` — so it can reach the residual data that the
-library hides.
+When SQLite deletes a row, its bytes usually stay on disk until the space gets
+reused, but the library stops exposing them. `sqlrecover` parses the SQLite file
+format directly rather than linking `libsqlite3`, so it can read the residual
+data the library no longer shows.
 
 ## What it recovers
 
@@ -19,17 +18,17 @@ library hides.
 | Freeblocks & slack | Deleted cells lingering inside leaf pages | `slack` |
 | WAL frames | Prior versions of rows from the write-ahead log | `wal_prior` |
 
-Every recovered record carries full **provenance** — source file, origin,
-page number, byte offset, and (for WAL hits) the frame index — because in a
-forensic context *where a byte came from* is as important as the byte itself.
+Every recovered record carries full provenance: source file, origin, page
+number, byte offset, and (for WAL hits) the frame index. In forensic work, where
+a byte came from matters as much as the byte itself.
 
 ## Known-artifact recognition
 
-Residual records recovered from slack space or the WAL arrive as anonymous
-arrays of typed values — there is no `CREATE TABLE` attached to a deleted row.
-`sqlrecover` matches each record against a built-in catalog of well-known
-Android schemas by **type fingerprint**, so a recovered row becomes a labelled
-artifact with named columns:
+Records recovered from slack space or the WAL come back as anonymous arrays of
+typed values, since a deleted row has no `CREATE TABLE` attached to it.
+`sqlrecover` matches each record against a built-in catalog of known Android
+schemas by type fingerprint, turning a recovered row into a labelled artifact
+with named columns:
 
 ```json
 {
@@ -47,16 +46,16 @@ artifact with named columns:
 
 The catalog currently covers Android SMS (`android_sms`), call log
 (`android_calllog`), and a common contact projection (`android_contact`).
-Matching is tolerant of NULL columns (routine on Android) and requires at least
-two type-constrained columns to agree before labelling, so it doesn't slap a
-name on noise. New artifacts are a few lines in `src/artifact.cpp`.
+Matching tolerates NULL columns, which are routine on Android, and requires at
+least two type-constrained columns to agree before it labels anything, so it
+won't tag noise. Adding a new artifact takes a few lines in `src/artifact.cpp`.
 
 ### Field decoding
 
-Matched artifacts also get their fields **decoded** into examiner-ready meaning,
-without discarding the raw values. Android stores timestamps as milliseconds
-since the Unix epoch and encodes message/call kinds as integers; the decoder
-turns these into ISO-8601 UTC times, enum labels, and formatted durations:
+Matched artifacts also get their fields decoded into readable values, while the
+raw values are kept. Android stores timestamps as milliseconds since the Unix
+epoch and encodes message and call kinds as integers; the decoder turns these
+into ISO-8601 UTC times, enum labels, and formatted durations:
 
 ```json
 {
@@ -68,17 +67,17 @@ turns these into ISO-8601 UTC times, enum labels, and formatted durations:
 }
 ```
 
-Decoders cover epoch-millis/seconds timestamps, call-type and SMS-type enums,
-boolean flags, and durations. The timestamp decoder range-checks its input
-(≈1990–2100) so a non-timestamp integer column isn't dressed up as a bogus date,
-and unknown enum codes are left undecoded rather than guessed.
+Decoders handle epoch-millis and epoch-seconds timestamps, call-type and
+SMS-type enums, boolean flags, and durations. The timestamp decoder
+range-checks its input (roughly 1990 to 2100) so an ordinary integer column
+doesn't get dressed up as a date, and unknown enum codes are left alone rather
+than guessed at.
 
 ## Cross-artifact timeline
 
-With `--timeline`, the tool merges every dated artifact event — SMS and calls,
-**live and recovered** — into one chronological view. This is the payoff of
-artifact recognition and decoding: instead of a per-table dump, you get "what
-happened on this device, in order", with deleted and modified events slotted
+With `--timeline`, the tool merges every dated event (SMS and calls, live and
+recovered) into a single chronological view. Instead of a per-table dump, you
+get the device's activity in order, with deleted and modified events slotted
 into place and flagged.
 
 ```
@@ -88,15 +87,15 @@ into place and flagged.
 ```
 
 `[R]` marks events recovered from slack space, the freelist, or prior WAL
-versions — i.e. data not visible in the live database. Output is written as both
-`timeline.txt` (human-readable) and `timeline.json` (each event with its
+versions, i.e. data that isn't visible in the live database. Output is written
+to both `timeline.txt` (human-readable) and `timeline.json` (each event with its
 provenance). Events that appear both live and as a WAL prior version are
-collapsed, preferring the live copy. Timestamps are UTC; see the note below.
+collapsed, keeping the live copy. Timestamps are UTC; see the note below.
 
-> **Timezone note:** Android stores timestamps in UTC, which is what the
-> timeline emits — the correct canonical form for evidence. A device *displays*
-> times in its local timezone, so when correlating against screenshots an
-> examiner must apply the device's offset.
+> **Timezone note:** Android stores timestamps in UTC, and that's what the
+> timeline emits, which is the right canonical form for evidence. A device
+> *displays* times in its local timezone, so when correlating against
+> screenshots you'll need to apply the device's offset.
 
 ## Building
 
@@ -171,11 +170,11 @@ lists one serial type per column. `sqlrecover`:
 4. Decodes each record's serial-type body into typed values and emits them with
    provenance as JSON or CSV, plus an optional summary report.
 
-Residual recovery is inherently heuristic — overwritten or coalesced freeblocks
-yield partial rows. The tool keeps weak matches but flags them `suspect` rather
-than discarding them, leaving triage to the examiner. Recovered text that isn't
-valid UTF-8 is preserved losslessly as hex (`$text_raw` / `0x…`) so nothing is
-silently dropped and output never corrupts.
+Residual recovery is heuristic by nature: overwritten or coalesced freeblocks
+yield partial rows. The tool keeps weak matches but flags them `suspect` instead
+of dropping them, leaving triage to the examiner. Recovered text that isn't
+valid UTF-8 is preserved as hex (`$text_raw` / `0x…`) so nothing is silently
+lost and the output never corrupts.
 
 ## Project layout
 
@@ -190,7 +189,7 @@ tests/                ground-truth corpus generator + smoke test
 
 `tests/make_corpus.py` builds a database with a *known* set of deleted rows
 (using `secure_delete=OFF`, Android's default, so freed bytes survive) and an
-uncheckpointed WAL. `tests/smoke_test.sh` runs the tool against it and asserts
+uncheckpointed WAL. `tests/smoke_test.sh` runs the tool against it and checks
 that genuinely-deleted rows are recovered with zero false positives:
 
 ```sh
@@ -198,17 +197,17 @@ that genuinely-deleted rows are recovered with zero false positives:
 ```
 
 `tests/make_android_corpus.py` builds a second corpus using authentic Android
-schemas (`sms`, `calls`), and `tests/artifact_test.sh` asserts that recovered
-and live records are correctly recognised as `android_sms` / `android_calllog`
-with named columns, and that recovered deleted messages are genuine deletions:
+schemas (`sms`, `calls`), and `tests/artifact_test.sh` checks that recovered and
+live records are correctly recognised as `android_sms` / `android_calllog` with
+named columns, and that recovered deleted messages are genuine deletions:
 
 ```sh
 ./tests/artifact_test.sh ./build/sqlrecover
 ```
 
-`tests/timeline_test.sh` runs `--timeline` against the same corpus and asserts
-the merged timeline is chronologically sorted, genuinely cross-artifact, and
-flags recovered events that match known deletions:
+`tests/timeline_test.sh` runs `--timeline` against the same corpus and checks
+that the merged timeline is chronologically sorted, genuinely cross-artifact,
+and flags recovered events that match known deletions:
 
 ```sh
 ./tests/timeline_test.sh ./build/sqlrecover
@@ -221,5 +220,5 @@ flags recovered events that match known deletions:
 - Signature carving recovers contiguous databases; fragmented files need the
   `USE_TSK` filesystem-aware path.
 - This is a learning/portfolio tool, not a validated evidentiary instrument.
-  Treat recovered data — especially `suspect` rows — as leads to verify, not
-  proof.
+  Treat recovered data, especially `suspect` rows, as leads to verify rather
+  than proof.

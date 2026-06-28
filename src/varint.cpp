@@ -8,7 +8,7 @@ Varint read_varint(ByteReader& r) {
     for (int i = 0; i < 9; ++i) {
         uint8_t b = r.u8();
         if (i == 8) {
-            // 9th byte contributes all 8 bits.
+            // 9th byte: all 8 bits count
             v = (v << 8) | b;
             out.length = 9;
             out.value = v;

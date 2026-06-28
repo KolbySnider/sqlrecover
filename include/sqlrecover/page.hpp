@@ -1,7 +1,8 @@
 #pragma once
-//
-// Database header (first 100 bytes) and per-page B-tree header parsing.
-//
+/// @file
+/// @brief Parsing for the 100-byte db header and the per-page B-tree
+/// headers.
+
 #include <cstdint>
 #include <vector>
 #include "sqlrecover/types.hpp"
@@ -9,18 +10,18 @@
 
 namespace sqlrecover {
 
-// Parsed from the 100-byte database header at the very start of the file.
+/// @brief Parsed contents of the 100-byte database header.
 struct DbHeader {
-    uint32_t     page_size = 0;     // bytes per page (512..65536, pow2)
-    uint32_t     page_count = 0;    // size of db in pages (header field)
-    uint32_t     freelist_trunk = 0;// page number of first freelist trunk page
-    uint32_t     freelist_count = 0;// total free pages
+    uint32_t     page_size = 0;        ///< 512..65536, power of 2
+    uint32_t     page_count = 0;       ///< can be stale on older files
+    uint32_t     freelist_trunk = 0;   ///< first freelist trunk page
+    uint32_t     freelist_count = 0;
     TextEncoding encoding = TextEncoding::Utf8;
-    uint8_t      reserved_per_page = 0; // reserved bytes at end of each page
+    uint8_t      reserved_per_page = 0;
     bool         valid = false;
 };
 
-// The B-tree page types we care about.
+/// @brief B-tree page type byte.
 enum class PageKind : uint8_t {
     InteriorIndex = 2,
     InteriorTable = 5,
@@ -29,25 +30,38 @@ enum class PageKind : uint8_t {
     Unknown       = 0,
 };
 
-// The 8- or 12-byte header at the top of every B-tree page.
+/// @brief Parsed B-tree page header (8 bytes leaf, 12 interior).
 struct PageHeader {
     PageKind kind = PageKind::Unknown;
     uint16_t first_freeblock = 0;
     uint16_t num_cells = 0;
-    uint16_t cell_content_start = 0; // 0 is interpreted as 65536
-    uint32_t right_pointer = 0;      // interior pages only
-    uint16_t header_size = 0;        // 8 (leaf) or 12 (interior)
+    uint16_t cell_content_start = 0; ///< 0 means 65536
+    uint32_t right_pointer = 0;      ///< interior pages only
+    uint16_t header_size = 0;        ///< 8 (leaf) or 12 (interior)
     bool     valid = false;
 };
 
-// Parse the database header. The magic string "SQLite format 3\0" must match.
+/// @brief Parse the 100-byte db header.
+/// Magic "SQLite format 3\0" must match.
+/// @param db Whole-file bytes (only the first 100 are inspected).
+/// @return Parsed header. The valid field is false if anything looked
+///         wrong; other fields are then undefined.
 DbHeader parse_db_header(const std::vector<uint8_t>& db);
 
-// Parse a B-tree page header. `page_no` is 1-based; page 1 carries the 100-byte
-// db header before its B-tree header, which this function accounts for.
+/// @brief Parse a B-tree page header. Page 1 has the 100-byte db header
+/// sitting in front of its B-tree header, which this function accounts
+/// for.
+/// @param page Pointer to the start of the page.
+/// @param page_size Bytes in the page.
+/// @param page_no 1-based page number.
+/// @return Parsed header. The valid field is false on an unrecognized
+///         type byte or a too-short page.
 PageHeader parse_page_header(const uint8_t* page, size_t page_size, uint32_t page_no);
 
-// Byte offset within the file where a 1-based page begins.
+/// @brief Byte offset where a 1-based page starts in the file.
+/// @param page_no 1-based page number.
+/// @param page_size Bytes per page.
+/// @return Absolute file offset.
 inline uint64_t page_offset(uint32_t page_no, uint32_t page_size) {
     return uint64_t(page_no - 1) * page_size;
 }

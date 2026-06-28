@@ -1,9 +1,8 @@
 #pragma once
-//
-// B-tree traversal to read *live* records. We walk table B-trees from a root
-// page, descending interior pages and decoding leaf cells. Overflow pages are
-// followed so large TEXT/BLOB values are reassembled in full.
-//
+/// @file
+/// @brief Walks live table B-trees: descend from the root, decode leaf
+/// cells, follow overflow chains so big TEXT/BLOB values come back whole.
+
 #include <vector>
 #include <functional>
 #include "sqlrecover/types.hpp"
@@ -11,11 +10,17 @@
 
 namespace sqlrecover {
 
-class Database; // fwd
+class Database;
 
-// Walk the table B-tree rooted at `root_page`, invoking `sink` for each live
-// leaf record. Visited pages are recorded in `visited` so the recovery pass can
-// later tell which pages were reachable (and thus which are residual).
+/// @brief Walk the table B-tree rooted at root_page and call sink for
+/// each leaf record. Pages we touch get marked in visited so the recovery
+/// passes know which ones are still reachable.
+/// @param db Source database.
+/// @param root_page 1-based root page of the table.
+/// @param table_label Name to stamp on each record's table field.
+/// @param[in,out] visited Sized to page_count()+2; entries are set to true
+///                        for each page touched during the walk.
+/// @param sink Callback invoked once per decoded leaf row.
 void walk_table_btree(const Database& db, uint32_t root_page,
                       const std::string& table_label,
                       std::vector<bool>& visited,

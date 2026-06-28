@@ -11,14 +11,16 @@ namespace sqlrecover {
 
 namespace {
 
-// Render a value compactly for use inside a summary line.
+/// @brief Compact rendering of a value for use inside a summary line.
+/// @param v Value to render.
+/// @return Short, single-line stringification.
 std::string brief(const Value& v) {
     switch (v.type) {
         case Value::Type::Null: return "";
         case Value::Type::Int:  return std::to_string(v.i);
         case Value::Type::Real: { std::ostringstream o; o << v.r; return o.str(); }
         case Value::Type::Text: {
-            // Keep summaries to a single line and bounded length.
+            // One line, bounded length
             std::string s = v.text;
             for (char& c : s) if (c == '\n' || c == '\r' || c == '\t') c = ' ';
             if (s.size() > 60) s = s.substr(0, 57) + "...";
@@ -29,8 +31,13 @@ std::string brief(const Value& v) {
     return "";
 }
 
-// Compose a one-line summary for a record using the artifact's chosen summary
-// columns. Decodes enum/duration columns so the summary reads naturally.
+/// @brief Build a one-line summary for a record using the artifact's
+/// chosen summary columns. Decodes enum/duration columns so it reads
+/// naturally.
+/// @param r Record to summarise.
+/// @param tl Timeline metadata for the matched artifact.
+/// @param interps Per-column interpreters for the matched artifact.
+/// @return Two-space-separated summary string.
 std::string make_summary(const Record& r, const ArtifactTimeline& tl,
                          const std::vector<Interp>& interps) {
     std::ostringstream o;
@@ -46,7 +53,7 @@ std::string make_summary(const Record& r, const ArtifactTimeline& tl,
         if (in != Interp::None && decode_value(v, in, decoded))
             piece = decoded;            // e.g. "sent", "outgoing", "7s"
         else
-            piece = brief(v);           // e.g. address or body text
+            piece = brief(v);
 
         if (piece.empty()) continue;
         if (!first) o << "  ";
@@ -70,8 +77,8 @@ std::vector<TimelineEvent> build_timeline(const std::vector<Record>& records) {
         const Value& tv = r.values[tl.time_index];
         if (tv.type != Value::Type::Int) continue;
 
-        // Decode the timestamp; reuse the same range-checked decoder used for
-        // column output so non-timestamp integers don't pollute the timeline.
+        // Decode the timestamp with the same range-checked path as column
+        // output so non-timestamp ints don't pollute the timeline
         std::string iso;
         if (!decode_value(tv, tl.time_interp, iso)) continue;
 
@@ -91,24 +98,22 @@ std::vector<TimelineEvent> build_timeline(const std::vector<Record>& records) {
         events.push_back(std::move(ev));
     }
 
-    // Sort ascending by time, then by artifact for stable grouping.
+    // Sort by time, break ties by artifact for stable grouping
     std::sort(events.begin(), events.end(),
               [](const TimelineEvent& a, const TimelineEvent& b) {
                   if (a.epoch_ms != b.epoch_ms) return a.epoch_ms < b.epoch_ms;
                   return a.artifact < b.artifact;
               });
 
-    // Collapse duplicates that describe the same event (same time + artifact +
-    // summary). A row can appear both live and as a WAL prior version, or twice
-    // across carved copies; prefer the live instance so the timeline marks it
-    // as not-recovered when any live copy exists.
+    // Collapse duplicates (same time + artifact + summary). A row can show
+    // up both live and as a WAL prior version, or twice across carved
+    // copies. If any copy is live, the merged one wins as live.
     std::vector<TimelineEvent> deduped;
     for (auto& ev : events) {
         if (!deduped.empty()) {
             TimelineEvent& last = deduped.back();
             if (last.epoch_ms == ev.epoch_ms && last.artifact == ev.artifact &&
                 last.summary == ev.summary) {
-                // Same event: if either copy is live, the merged one is live.
                 if (!ev.recovered) {
                     last.recovered = false;
                     last.origin = Origin::Live;

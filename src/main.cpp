@@ -44,6 +44,7 @@ constexpr const char* kUsage =
 "\n"
 "exit codes: 0 ok, 1 parse error, 2 bad arguments\n";
 
+/// @brief Parsed command-line arguments.
 struct Args {
     std::string input;
     std::string wal;
@@ -57,11 +58,17 @@ struct Args {
     bool timeline = false;
 };
 
+/// @brief Print an argument error and exit with code 2.
+/// @param msg Error message.
 [[noreturn]] void die_args(const std::string& msg) {
     std::cerr << "error: " << msg << "\n\n" << kUsage;
     std::exit(2);
 }
 
+/// @brief Parse argv into an Args struct.
+/// @param argc Argument count.
+/// @param argv Argument vector.
+/// @return Populated Args.
 Args parse_args(int argc, char** argv) {
     Args a;
     std::vector<std::string> pos;
@@ -91,10 +98,13 @@ Args parse_args(int argc, char** argv) {
     return a;
 }
 
-// Label a recovered record by (1) matching its arity against the live schema,
-// attaching column names when there's a unique match, and (2) matching it
-// against the known-artifact catalog, which works even when no live schema row
-// describes the source table (the common case for residual data).
+/// @brief Label a recovered record two ways: (1) match its arity against
+/// the live schema and attach column names when there's a unique hit;
+/// (2) match it against the known-artifact catalog, which can work even
+/// when no live schema row describes the source table (the usual case
+/// for residual data).
+/// @param[in,out] recs Records to label in place.
+/// @param tables Live schema definitions from sqlite_master.
 void label_records(std::vector<Record>& recs, const std::vector<TableDef>& tables) {
     std::map<size_t, std::vector<const TableDef*>> by_arity;
     for (const auto& t : tables)
@@ -102,7 +112,7 @@ void label_records(std::vector<Record>& recs, const std::vector<TableDef>& table
             by_arity[t.columns.size()].push_back(&t);
 
     for (auto& r : recs) {
-        // (1) Schema-based label, if not already set by the live walk.
+        // (1) Schema-based label, if the live walk didn't already set one
         if (r.table.empty()) {
             auto it = by_arity.find(r.values.size());
             if (it != by_arity.end() && it->second.size() == 1) {
@@ -113,8 +123,8 @@ void label_records(std::vector<Record>& recs, const std::vector<TableDef>& table
                     r.column_names = t->columns;
             }
         }
-        // (2) Known-artifact match. This can name columns even when the schema
-        // inference above found nothing, and gives a portable artifact tag.
+        // (2) Known-artifact match. Can name columns when schema inference
+        // turned up nothing, and gives a portable artifact tag.
         if (r.artifact.empty()) {
             std::string aname;
             std::vector<std::string> acols;
@@ -123,7 +133,7 @@ void label_records(std::vector<Record>& recs, const std::vector<TableDef>& table
                 if (r.column_names.empty()) r.column_names = acols;
                 if (r.table.empty()) r.table = aname + " (artifact)";
 
-                // Decode interpreted columns into examiner-ready meaning.
+                // Decode whatever columns the artifact knows how to decode
                 std::vector<Interp> interps = artifact_interps(aname);
                 for (size_t i = 0; i < r.values.size() &&
                                    i < interps.size() &&
@@ -146,8 +156,8 @@ int main(int argc, char** argv) {
     };
 
     try {
-        // Build the list of databases to process. For a raw image, carve out
-        // every SQLite database first; otherwise it's just the one input file.
+        // Figure out which dbs to process. For a raw image, carve every
+        // SQLite db out first; otherwise it's just the one input file.
         std::vector<std::string> db_paths;
         if (args.image) {
             std::string scratch = (fs::path(args.output) / "carved").string();
@@ -160,17 +170,17 @@ int main(int argc, char** argv) {
             db_paths.push_back(args.input);
         }
 
-        std::vector<Record> out;          // aggregated across all databases
-        std::vector<Record> tl_records;   // all labelled records for the timeline
-        RunSummary sum;                   // aggregated summary
+        std::vector<Record> out;          // aggregated across all dbs
+        std::vector<Record> tl_records;   // everything labelled, for the timeline
+        RunSummary sum;
         sum.input_file = args.input;
 
         for (const std::string& db_path : db_paths) {
             log("opening " + db_path);
             Database db = Database::open(db_path);
 
-            // Resolve WAL: explicit flag (only meaningful for single db), else
-            // the conventional sidecar next to this database.
+            // Pick a WAL: explicit flag (only really makes sense for a
+            // single db), else the sidecar next to this db.
             std::string wal_path = (!args.image && !args.wal.empty())
                                  ? args.wal : std::string();
             if (wal_path.empty()) {
@@ -187,7 +197,7 @@ int main(int argc, char** argv) {
             std::vector<Record> live, residual;
             std::vector<bool> visited(db.page_count() + 2, false);
 
-            // 1. Live records (also marks visited pages). We capture the table's
+            // 1. Live records (also marks visited pages). Grab the table's
             // column names so live output is fully labelled.
             for (const auto& t : tables) {
                 const std::vector<std::string>& cols = t.columns;
@@ -200,20 +210,20 @@ int main(int argc, char** argv) {
             }
             log("live records: " + std::to_string(live.size()));
 
-            // 2. Freelist recovery.
+            // 2. Freelist recovery
             size_t before = residual.size();
             recover_freelist(db, visited,
                              [&](Record&& r){ residual.push_back(std::move(r)); });
             size_t freelist_n = residual.size() - before;
             log("freelist records: " + std::to_string(freelist_n));
 
-            // 3. Slack-space recovery.
+            // 3. Slack-space recovery
             before = residual.size();
             recover_slack(db, [&](Record&& r){ residual.push_back(std::move(r)); });
             size_t slack_n = residual.size() - before;
             log("slack records: " + std::to_string(slack_n));
 
-            // 4. WAL prior-state recovery.
+            // 4. WAL prior-state recovery
             before = residual.size();
             if (!wal_path.empty())
                 recover_wal(db, wal_path,
@@ -224,8 +234,8 @@ int main(int argc, char** argv) {
             label_records(residual, tables);
             label_records(live, tables);
 
-            // The timeline always draws on both live and recovered records,
-            // independent of whether --live is set for the main record dump.
+            // Timeline always pulls from both live and recovered, no matter
+            // what --live is set to for the main dump
             if (args.timeline) {
                 tl_records.insert(tl_records.end(), live.begin(), live.end());
                 tl_records.insert(tl_records.end(), residual.begin(), residual.end());
@@ -234,8 +244,8 @@ int main(int argc, char** argv) {
             if (args.live) out.insert(out.end(), live.begin(), live.end());
             out.insert(out.end(), residual.begin(), residual.end());
 
-            // Accumulate summary. page_size/page_count reflect the last db when
-            // multiple are processed; the per-origin counts sum across all.
+            // page_size/page_count just reflect the last db when there's
+            // more than one; the per-origin counts sum across all of them
             if (!wal_path.empty() && sum.wal_file.empty()) sum.wal_file = wal_path;
             sum.page_size = db.page_size();
             sum.page_count = db.page_count();
@@ -245,7 +255,7 @@ int main(int argc, char** argv) {
             sum.wal_prior += wal_n;
         }
 
-        // Optional table filter, applied to the aggregated set.
+        // Optional table filter on the aggregated set
         if (!args.table.empty()) {
             std::vector<Record> filt;
             for (auto& r : out)
@@ -257,7 +267,7 @@ int main(int argc, char** argv) {
             if (!r.artifact.empty()) ++sum.artifacts;
         }
 
-        // Write outputs.
+        // Write outputs
         fs::create_directories(args.output);
         std::string ext = (args.format == "json") ? ".json" : ".csv";
         std::string rec_path = (fs::path(args.output) / ("records" + ext)).string();

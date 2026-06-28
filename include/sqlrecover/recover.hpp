@@ -1,20 +1,19 @@
 #pragma once
-//
-// Recovery of deleted/residual records. Two strategies:
-//
-//   1. Freelist pages — pages SQLite has returned to the free pool. Their old
-//      cell content is usually still intact until the page is reused. We scan
-//      the page as if it were a leaf and decode any cells we can.
-//
-//   2. Slack space — on a live leaf page, the area between the start of the
-//      cell-content region and the cell-pointer array can hold the remains of
-//      deleted cells. We scan every page's unallocated/freeblock space for
-//      decodable records.
-//
-// Both are heuristic: we attempt to decode at candidate offsets and keep what
-// parses cleanly and passes sanity checks. False positives are expected and are
-// flagged `suspect` rather than discarded, so the analyst decides.
-//
+/// @file
+/// @brief Recovering deleted rows. Two passes:
+///
+///   1. Freelist pages. SQLite returns pages to the free pool but doesn't
+///      zero them, so old cells are usually still there until something
+///      reuses the page. We just scan the page as if it were a leaf.
+///
+///   2. Slack space. On live leaf pages, the gap between cell-content
+///      and the cell-pointer array, plus any freeblocks inside the
+///      content region, tends to hold deleted cell remnants.
+///
+/// Both passes are heuristic. We decode at candidate offsets and keep
+/// what parses and looks vaguely sane. False positives happen; those get
+/// flagged `suspect` so you can decide what to do with them.
+
 #include <vector>
 #include <functional>
 #include "sqlrecover/types.hpp"
@@ -23,12 +22,21 @@ namespace sqlrecover {
 
 class Database;
 
-// Scan freelist pages for recoverable leaf-table cells.
+/// @brief Scan freelist pages for recoverable cells.
+/// @param db Source database.
+/// @param visited_live Pages already touched by the live walk (currently
+///                     unused; reserved for future "skip pages that are
+///                     still in use" logic).
+/// @param sink Callback invoked once per decoded row found on a freelist
+///             page. Records get origin = Freelist.
 void recover_freelist(const Database& db,
                       const std::vector<bool>& visited_live,
                       const std::function<void(Record&&)>& sink);
 
-// Scan slack/unallocated space on every page for residual records.
+/// @brief Scan slack and freeblock space on every leaf page.
+/// @param db Source database.
+/// @param sink Callback invoked once per decoded row. Records get
+///             origin = Slack.
 void recover_slack(const Database& db,
                    const std::function<void(Record&&)>& sink);
 

@@ -9,16 +9,26 @@
 namespace sqlrecover {
 
 namespace {
-// Decode local leaf-table cells from a standalone page image (a WAL frame's
-// page). We don't follow overflow across frames — prior leaf content is what we
-// want and is self-contained on the page for the common case.
+
+/// @brief Decode leaf-table cells from a WAL frame's page image. We don't
+/// follow overflow across frames -- prior leaf content is what we want
+/// and it's self-contained on the page in the common case.
+/// @param page Page bytes from the frame.
+/// @param page_size Page size in bytes.
+/// @param usable Usable bytes per page.
+/// @param enc Text encoding from the parent db.
+/// @param db_page_no 1-based page number this frame is for.
+/// @param frame_idx 0-based frame index within the WAL.
+/// @param src WAL file path, stamped on each record's source_file.
+/// @param sink Callback for each decoded row (origin = WalPrior).
+/// @param[in,out] count Bumped once per row emitted.
 void decode_frame_page(const uint8_t* page, uint32_t page_size, uint32_t usable,
                        TextEncoding enc, uint32_t db_page_no, uint32_t frame_idx,
                        const std::string& src,
                        const std::function<void(Record&&)>& sink,
                        uint32_t& count) {
-    // The frame's page has a normal B-tree header; page 1 image still carries
-    // the 100-byte db header offset.
+    // Frame's page has the normal B-tree header. Page 1 still has the
+    // 100-byte db header in front.
     PageHeader ph = parse_page_header(page, page_size, db_page_no);
     if (!ph.valid || ph.kind != PageKind::LeafTable) return;
 
@@ -60,7 +70,7 @@ WalStats recover_wal(const Database& db, const std::string& wal_path,
     try { wal = read_file(wal_path); } catch (...) { return st; }
     if (wal.size() < 32) return st;
 
-    // WAL header: 32 bytes. Magic 0x377f0682 (LE host) / 0x377f0683 (BE host).
+    // WAL header is 32 bytes. Magic 0x377f0682 (LE host) / 0x377f0683 (BE).
     ByteReader h(wal.data(), wal.size());
     uint32_t magic = h.u32();
     if (magic != 0x377f0682 && magic != 0x377f0683) return st;
@@ -73,7 +83,7 @@ WalStats recover_wal(const Database& db, const std::string& wal_path,
     uint32_t usable = page_size - db.header().reserved_per_page;
     TextEncoding enc = db.header().encoding;
 
-    // Frames: 24-byte frame header + page_size page image, repeating.
+    // Then frames repeat: 24-byte frame header + page_size page image.
     size_t off = 32;
     uint32_t frame_idx = 0;
     const size_t frame_size = 24 + page_size;
@@ -81,7 +91,7 @@ WalStats recover_wal(const Database& db, const std::string& wal_path,
         ByteReader fh(wal.data(), wal.size(), off);
         uint32_t db_page_no = fh.u32(); // page number this frame is for
         fh.u32(); // db size after commit (0 for non-commit frames)
-        // (salt + checksums follow; we don't verify checksums here)
+        // salt + checksums follow but we don't verify them
         const uint8_t* page_img = wal.data() + off + 24;
         if (db_page_no != 0)
             decode_frame_page(page_img, page_size, usable, enc, db_page_no,

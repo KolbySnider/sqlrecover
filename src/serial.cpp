@@ -6,24 +6,27 @@ namespace sqlrecover {
 
 uint64_t serial_type_size(uint64_t t) {
     switch (t) {
-        case 0: return 0;          // NULL
+        case 0: return 0;            // NULL
         case 1: return 1;
         case 2: return 2;
         case 3: return 3;
         case 4: return 4;
         case 5: return 6;
         case 6: return 8;
-        case 7: return 8;          // float
-        case 8: return 0;          // const 0
-        case 9: return 0;          // const 1
-        case 10: case 11: return 0;// reserved
+        case 7: return 8;            // float
+        case 8: return 0;            // const 0
+        case 9: return 0;            // const 1
+        case 10: case 11: return 0;  // reserved
         default:
             return (t >= 12) ? (t - 12) / 2 : 0;
     }
 }
 
+/// @brief Sign-extend an n-byte big-endian two's-complement int.
+/// @param p Pointer to the first byte.
+/// @param n Number of bytes (1..8).
+/// @return The decoded signed value.
 static int64_t read_be_int(const uint8_t* p, int n) {
-    // Sign-extend an n-byte big-endian two's-complement integer.
     uint64_t v = 0;
     for (int i = 0; i < n; ++i) v = (v << 8) | p[i];
     if (n < 8) {
@@ -33,6 +36,9 @@ static int64_t read_be_int(const uint8_t* p, int n) {
     return static_cast<int64_t>(v);
 }
 
+/// @brief Decode an 8-byte big-endian IEEE-754 double.
+/// @param p Pointer to the first byte.
+/// @return The decoded float64.
 static double read_be_double(const uint8_t* p) {
     uint64_t v = 0;
     for (int i = 0; i < 8; ++i) v = (v << 8) | p[i];
@@ -46,14 +52,14 @@ bool decode_record(const uint8_t* payload, size_t avail,
     out.clear();
     if (avail == 0) return false;
 
-    // Header: varint header length (includes its own bytes).
+    // Header starts with a varint header-length (includes its own bytes)
     Varint hv = decode_varint(payload, avail);
     if (hv.length == 0) return false;
     uint64_t header_len = hv.value;
     if (header_len == 0 || header_len > avail) return false;
 
-    size_t hp = hv.length;             // cursor within header
-    size_t body = header_len;          // cursor within body
+    size_t hp = hv.length;             // cursor in the header
+    size_t body = header_len;          // cursor in the body
     std::vector<uint64_t> serials;
     serials.reserve(8);
 
@@ -65,7 +71,8 @@ bool decode_record(const uint8_t* payload, size_t avail,
     }
     if (hp != header_len) return false; // header didn't end cleanly
 
-    // Sanity: an absurd column count is almost certainly a misparse.
+    // sanity check, pretty sure SQLite tables are not going to be bigger than 2000 let alone
+    //  4096
     if (serials.size() > 4096) return false;
 
     for (uint64_t st : serials) {
@@ -82,18 +89,19 @@ bool decode_record(const uint8_t* payload, size_t avail,
                 out.push_back(Value::integer(read_be_int(bp, (int)sz)));
                 break;
             case 10: case 11:
-                out.push_back(Value::null()); // reserved -> treat as null
+                out.push_back(Value::null()); // reserved, treat as null
                 break;
             default:
                 if (st >= 12 && (st % 2 == 0)) {
                     out.push_back(Value::make_blob(
                         std::vector<uint8_t>(bp, bp + sz)));
-                } else { // odd >= 13 : TEXT
+                } else { // odd >= 13, TEXT
                     if (enc == TextEncoding::Utf8) {
                         out.push_back(Value::make_text(
                             std::string(reinterpret_cast<const char*>(bp), sz)));
                     } else {
-                        // Preserve UTF-16 bytes losslessly as a blob.
+                        // UTF-16: hand back the raw bytes as a blob so we
+                        // don't lose anything
                         out.push_back(Value::make_blob(
                             std::vector<uint8_t>(bp, bp + sz)));
                     }

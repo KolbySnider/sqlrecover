@@ -9,16 +9,23 @@ namespace sqlrecover {
 
 namespace {
 
-// Reassemble a cell payload that may spill onto overflow pages. SQLite keeps a
-// prefix on the leaf page and chains the remainder through overflow pages, each
-// of which starts with a 4-byte next-page pointer.
+/// @brief Glue together a cell payload that spilled across overflow pages.
+/// SQLite keeps a prefix on the leaf and chains the rest through overflow
+/// pages, each starting with a 4-byte next-page pointer.
+/// @param db Source database (for page lookups and usable size).
+/// @param local Pointer to the on-leaf payload prefix.
+/// @param local_len Bytes of payload sitting on the leaf.
+/// @param total_len Total payload length to assemble.
+/// @param first_overflow Page number of the first overflow page.
+/// @return Assembled payload bytes (may be shorter than total_len if the
+///         chain breaks or loops).
 std::vector<uint8_t> assemble_payload(const Database& db,
                                       const uint8_t* local, uint32_t local_len,
                                       uint64_t total_len, uint32_t first_overflow) {
     std::vector<uint8_t> buf(local, local + local_len);
     uint32_t next = first_overflow;
     uint32_t usable = db.usable_size();
-    std::set<uint32_t> seen; // guard against corrupt cyclic chains
+    std::set<uint32_t> seen; // bail out if the chain loops on us
     while (next != 0 && buf.size() < total_len) {
         if (!seen.insert(next).second) break;
         const uint8_t* op;
@@ -34,17 +41,27 @@ std::vector<uint8_t> assemble_payload(const Database& db,
     return buf;
 }
 
-// How many payload bytes live on the leaf page before spilling to overflow.
-// This is the standard SQLite formula for table leaf pages.
+/// @brief How many payload bytes live on the leaf before spilling.
+/// SQLite's formula for table leaf pages.
+/// @param P Total payload size.
+/// @param usable Usable bytes per page.
+/// @return Number of payload bytes that fit on the leaf.
 uint32_t local_payload_len(uint64_t P, uint32_t usable) {
     uint32_t U = usable;
-    uint32_t X = U - 35;                 // max local for table leaf
+    uint32_t X = U - 35;
     if (P <= X) return static_cast<uint32_t>(P);
     uint32_t M = ((U - 12) * 32) / 255 - 23;
     uint32_t K = M + (P - M) % (U - 4);
     return (K <= X) ? K : M;
 }
 
+/// @brief Recursive page walker driving walk_table_btree.
+/// @param db Source database.
+/// @param page_no Current page to visit.
+/// @param table_label Label to stamp on emitted records.
+/// @param[in,out] visited Visited-page bitmap.
+/// @param sink Callback for each decoded leaf row.
+/// @param depth Current recursion depth (bailout guard).
 void walk_page(const Database& db, uint32_t page_no,
                const std::string& table_label,
                std::vector<bool>& visited,
@@ -52,7 +69,7 @@ void walk_page(const Database& db, uint32_t page_no,
                int depth) {
     if (depth > 64) return;                       // runaway guard
     if (page_no == 0 || page_no >= visited.size()) return;
-    if (visited[page_no]) return;                 // already walked
+    if (visited[page_no]) return;
     visited[page_no] = true;
 
     const uint8_t* page;
@@ -76,7 +93,7 @@ void walk_page(const Database& db, uint32_t page_no,
         return;
     }
 
-    if (ph.kind != PageKind::LeafTable) return; // index pages: skip for now
+    if (ph.kind != PageKind::LeafTable) return; // index pages, skip for now
 
     for (uint16_t i = 0; i < ph.num_cells; ++i) {
         uint16_t cell_ptr = cells.u16();
@@ -84,7 +101,7 @@ void walk_page(const Database& db, uint32_t page_no,
         ByteReader c(page, db.page_size(), cell_ptr);
 
         Varint plen = read_varint(c);   // total payload bytes
-        Varint rowid = read_varint(c);  // rowid
+        Varint rowid = read_varint(c);
         size_t payload_start = c.pos();
 
         uint32_t local = local_payload_len(plen.value, usable);

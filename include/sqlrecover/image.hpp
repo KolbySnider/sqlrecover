@@ -1,28 +1,34 @@
 #pragma once
-//
-// Raw image support. A physical Android acquisition is a raw partition image
-// (dd / .img / .bin). Two ways to get SQLite databases out of it:
-//
-//   1. Filesystem-aware (best): walk the EXT4/F2FS filesystem with libtsk and
-//      extract files by path. Enabled at build time with -DUSE_TSK=ON. This
-//      recovers file names and is robust to fragmentation.
-//
-//   2. Signature carving (always available): scan the raw bytes for the
-//      "SQLite format 3\0" magic and carve contiguous database files. Simple,
-//      filesystem-agnostic, and good enough to surface databases that the
-//      filesystem layer might have unlinked. Fragmented files won't carve
-//      cleanly — that's the tradeoff for needing no dependencies.
-//
-// Carved databases are written to a scratch directory and their paths returned;
-// the normal per-database recovery pipeline then runs on each.
-//
+/// @file
+/// @brief Raw image support. If you've got a dd / .img / .bin of a
+/// partition rather than just the .db file, we'll pull the SQLite
+/// databases out of it first.
+///
+/// Two ways to do that:
+///   1. Filesystem-aware via libtsk (build with -DUSE_TSK=ON). Walks the
+///      FS and pulls files by path. Robust to fragmentation, keeps file
+///      names.
+///   2. Signature carving (always available). Scans for the SQLite
+///      magic and carves contiguous .db files out. No deps, but
+///      fragmented files won't carve cleanly -- that's the tradeoff.
+///
+/// Carved dbs land in a scratch dir; the normal pipeline then runs on
+/// each.
+
 #include <string>
 #include <vector>
 
 namespace sqlrecover {
 
-// Carve SQLite databases out of a raw image into `out_dir`. Returns the paths
-// of the carved .db files. Uses libtsk when compiled in, else signature carving.
+/// @brief Pull SQLite databases out of a raw image into out_dir. Uses
+/// libtsk when compiled in, otherwise signature carving.
+/// @param image_path Path to the raw partition image.
+/// @param out_dir Scratch directory for carved .db files (created if
+///                missing).
+/// @param verbose If true, log each carve to stderr.
+/// @return Paths of the carved .db files.
+/// @throws ParseError if the image can't be opened during signature
+///         carving.
 std::vector<std::string> carve_databases(const std::string& image_path,
                                           const std::string& out_dir,
                                           bool verbose);

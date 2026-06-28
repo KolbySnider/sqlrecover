@@ -14,9 +14,7 @@ Database Database::open(const std::string& path) {
 }
 
 uint32_t Database::page_count() const {
-    // Trust the header field when it is consistent with the file size;
-    // otherwise derive from the file size. Forensic images are often truncated
-    // or padded, so the file-size derivation is the safer default.
+    // Header field can be stale, so cross-check against file size.
     uint32_t by_size = hdr_.page_size
         ? static_cast<uint32_t>(data_.size() / hdr_.page_size) : 0;
     if (hdr_.page_count != 0 && hdr_.page_count <= by_size)

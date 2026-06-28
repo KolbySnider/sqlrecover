@@ -1,10 +1,10 @@
 #pragma once
-//
-// sqlite_master parsing. Page 1 roots the schema table, whose rows describe
-// every table/index: type, name, root page, and the CREATE statement. We use it
-// to (a) find table root pages to walk and (b) label recovered columns by name
-// when a residual record's column count matches a known table.
-//
+/// @file
+/// @brief sqlite_master parsing. Page 1 is the schema table root. Each
+/// row has (type, name, tbl_name, rootpage, sql). We use it for two
+/// things: find root pages to walk, and name columns on recovered rows
+/// whose arity matches a known table.
+
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -14,18 +14,24 @@ namespace sqlrecover {
 
 class Database;
 
+/// @brief One user table from sqlite_master.
 struct TableDef {
     std::string              name;
     uint32_t                 root_page = 0;
-    std::vector<std::string> columns;     // parsed from CREATE TABLE
+    std::vector<std::string> columns;
 };
 
-// Read sqlite_master from page 1 and return ordinary table definitions.
+/// @brief Read sqlite_master and return user tables (anything not
+/// prefixed sqlite_).
+/// @param db Source database.
+/// @return One entry per user table found.
 std::vector<TableDef> read_schema(const Database& db);
 
-// Very small CREATE TABLE column-name extractor. Not a full SQL parser — it
-// pulls the leading identifier of each top-level comma-separated column def,
-// which is enough to label fields. Returns empty on anything it can't handle.
+/// @brief Pull column names out of a CREATE TABLE statement. Not a real
+/// SQL parser: grabs the leading identifier of each top-level
+/// comma-separated piece.
+/// @param create_sql The full "CREATE TABLE ..." text from sqlite_master.
+/// @return Column names in order; empty if anything looks weird.
 std::vector<std::string> parse_create_columns(const std::string& create_sql);
 
 } // namespace sqlrecover

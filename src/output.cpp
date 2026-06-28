@@ -9,8 +9,11 @@ namespace sqlrecover {
 
 namespace {
 
-// Minimal UTF-8 well-formedness check. We don't need full validation, just
-// enough to decide whether a byte string is safe to embed in JSON as text.
+/// @brief Minimal UTF-8 well-formedness check. Not a full validator --
+/// just enough to decide whether a byte string is safe to drop into
+/// JSON as text.
+/// @param s Byte string to check.
+/// @return true if s is well-formed UTF-8.
 bool is_valid_utf8(const std::string& s) {
     size_t i = 0, n = s.size();
     while (i < n) {
@@ -29,17 +32,19 @@ bool is_valid_utf8(const std::string& s) {
     return true;
 }
 
-// Render a value for JSON. BLOBs become a {"$blob": "<hex>"} object so the type
-// is unambiguous and binary survives JSON's text-only nature.
+/// @brief Render a Value as JSON. Dirty TEXT and BLOB bytes get wrapped
+/// in a tagged hex object rather than being lost or mangled.
+/// @param v Value to render.
+/// @return A nlohmann::json node.
 json value_to_json(const Value& v) {
     switch (v.type) {
         case Value::Type::Null: return nullptr;
         case Value::Type::Int:  return v.i;
         case Value::Type::Real: return v.r;
         case Value::Type::Text: {
-            // Recovered TEXT can contain bytes that aren't valid UTF-8 (residual
-            // data is dirty). JSON is UTF-8 only, so surface invalid text as a
-            // tagged hex object rather than losing or corrupting it.
+            // Recovered TEXT can have bytes that aren't valid UTF-8.
+            // JSON is UTF-8 only, so wrap dirty bytes in a tagged hex
+            // object rather than losing or mangling them.
             if (is_valid_utf8(v.text)) return v.text;
             static const char* hex = "0123456789abcdef";
             std::string s;
@@ -58,15 +63,18 @@ json value_to_json(const Value& v) {
     return nullptr;
 }
 
-// Flatten a value to a single CSV cell. BLOBs are shown as a byte-count tag.
+/// @brief Squash a value into a single CSV cell. BLOBs get a byte-count
+/// tag rather than a hex dump.
+/// @param v Value to render.
+/// @return Stringified value safe for one CSV cell.
 std::string value_to_cell(const Value& v) {
     switch (v.type) {
         case Value::Type::Null: return "";
         case Value::Type::Int:  return std::to_string(v.i);
         case Value::Type::Real: { std::ostringstream o; o << v.r; return o.str(); }
         case Value::Type::Text: {
-            // As with JSON, recovered text may be dirty. If it isn't clean
-            // UTF-8, present it as a hex string so the CSV stays well-formed.
+            // Same UTF-8 story as JSON. Show dirty text as hex so the
+            // CSV stays well-formed.
             if (is_valid_utf8(v.text)) {
                 std::string out;
                 out.reserve(v.text.size());
@@ -84,6 +92,10 @@ std::string value_to_cell(const Value& v) {
     return "";
 }
 
+/// @brief Quote and escape a string for use as a CSV field.
+/// @param s Raw cell content.
+/// @return s as-is when it has no special chars, otherwise wrapped in
+///         double quotes with embedded quotes doubled.
 std::string csv_escape(const std::string& s) {
     bool needs = s.find_first_of(",\"\n\r") != std::string::npos;
     if (!needs) return s;
@@ -112,9 +124,9 @@ void write_json(std::ostream& os, const std::vector<Record>& records) {
         if (r.prov.wal_frame) prov["wal_frame"] = *r.prov.wal_frame;
         jr["provenance"] = prov;
 
-        // Always emit the positional values array. When column names are known,
-        // also emit a "columns" object mapping name -> value, which is what
-        // makes recovered artifacts readable (address, body, date…).
+        // Always emit positional values. If we know column names, also
+        // emit a "columns" object, which is what makes matched artifacts
+        // readable (address, body, date, ...).
         json vals = json::array();
         for (const auto& v : r.values) vals.push_back(value_to_json(v));
         jr["values"] = vals;
@@ -127,7 +139,7 @@ void write_json(std::ostream& os, const std::vector<Record>& records) {
             jr["columns"] = cols;
         }
 
-        // Human-readable decodings (timestamps, enum labels, durations).
+        // Readable decodings (timestamps, enum labels, durations)
         if (!r.decoded.empty()) {
             json dec = json::object();
             for (const auto& kv : r.decoded) dec[kv.first] = kv.second;
@@ -135,9 +147,8 @@ void write_json(std::ostream& os, const std::vector<Record>& records) {
         }
         arr.push_back(std::move(jr));
     }
-    // error_handler_t::replace guarantees we never throw on stray invalid bytes
-    // that slipped past value-level handling — a forensic tool must not crash on
-    // dirty input.
+    // error_handler_t::replace so we never throw on stray invalid bytes
+    // that snuck past the value-level handling
     os << arr.dump(2, ' ', false, json::error_handler_t::replace) << "\n";
 }
 
@@ -189,9 +200,9 @@ void write_report(std::ostream& os, const RunSummary& s) {
        << (s.live + s.freelist + s.slack + s.wal_prior) << "\n"
        << "  of which suspect: " << s.suspect << "\n"
        << "  matched artifact: " << s.artifacts << "\n\n"
-       << "Note: freelist, slack and wal records are residual data recovered\n"
-       << "heuristically. 'suspect' entries parsed but failed strength checks\n"
-       << "and warrant manual review before use as evidence.\n";
+       << "Note: freelist, slack and wal records are residual data and are\n"
+       << "recovered heuristically. 'suspect' rows parsed but didn't pass\n"
+       << "the strength checks, so eyeball them before trusting.\n";
 }
 
 } // namespace sqlrecover

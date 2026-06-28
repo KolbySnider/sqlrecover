@@ -6,10 +6,9 @@
 namespace sqlrecover {
 
 std::vector<std::string> parse_create_columns(const std::string& sql) {
-    // Find the top-level "(" ... ")" and split columns on commas at paren
-    // depth 1, taking the first identifier of each. Deliberately conservative:
-    // anything unusual yields an empty result and we fall back to positional
-    // column labels.
+    // Find the top-level "(...)" and split on commas at depth 1, taking the
+    // first identifier of each piece. Anything weird falls through to empty
+    // and we use positional labels.
     std::vector<std::string> cols;
     size_t open = sql.find('(');
     if (open == std::string::npos) return cols;
@@ -17,8 +16,6 @@ std::vector<std::string> parse_create_columns(const std::string& sql) {
     int depth = 0;
     std::string cur;
     auto flush = [&]() {
-        // Trim leading whitespace, then read the first token (the column name),
-        // stripping quotes/backticks/brackets.
         size_t i = 0;
         while (i < cur.size() && std::isspace((unsigned char)cur[i])) ++i;
         std::string name;
@@ -30,7 +27,7 @@ std::vector<std::string> parse_create_columns(const std::string& sql) {
             while (i < cur.size() && (std::isalnum((unsigned char)cur[i]) || cur[i]=='_'))
                 name += cur[i++];
         }
-        // Skip table-level constraints masquerading as columns.
+        // Skip table-level constraints that look like columns
         std::string upper;
         for (char ch : name) upper += std::toupper((unsigned char)ch);
         if (!name.empty() && upper!="PRIMARY" && upper!="UNIQUE" &&
@@ -50,8 +47,8 @@ std::vector<std::string> parse_create_columns(const std::string& sql) {
 }
 
 std::vector<TableDef> read_schema(const Database& db) {
-    // sqlite_master is a normal table rooted at page 1. Its columns are:
-    //   type, name, tbl_name, rootpage, sql
+    // sqlite_master is a normal table rooted at page 1.
+    // Columns: type, name, tbl_name, rootpage, sql
     std::vector<TableDef> defs;
     std::vector<bool> visited(db.page_count() + 2, false);
 

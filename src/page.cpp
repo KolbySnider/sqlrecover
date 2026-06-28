@@ -18,14 +18,13 @@ DbHeader parse_db_header(const std::vector<uint8_t>& db) {
     DbHeader h;
     if (db.size() < 100) return h;
     static const char magic[16] = {'S','Q','L','i','t','e',' ','f',
-                                   'o','r','m','a','t',' ','3','\0'};
+                                   'o','r','m','a','t',' ','3','\0'}; // HAS to be EXACT
     if (std::memcmp(db.data(), magic, 16) != 0) return h;
 
     ByteReader r(db.data(), db.size(), 16);
     uint16_t ps = r.u16();
-    // page size of 1 means 65536.
+    // page_size == 1 means 65536
     h.page_size = (ps == 1) ? 65536u : ps;
-    // Validate power-of-two in range.
     if (h.page_size < 512 || (h.page_size & (h.page_size - 1)) != 0)
         return h;
 
@@ -38,15 +37,13 @@ DbHeader parse_db_header(const std::vector<uint8_t>& db) {
                : (enc == 3) ? TextEncoding::Utf16be
                             : TextEncoding::Utf8;
 
-    // page_count header field can be stale/zero on older files; caller may fall
-    // back to file-size / page-size.
     h.valid = true;
     return h;
 }
 
 PageHeader parse_page_header(const uint8_t* page, size_t page_size, uint32_t page_no) {
     PageHeader ph;
-    // Page 1's B-tree header sits *after* the 100-byte database header.
+    // Page 1's B-tree header sits after the 100-byte db header
     size_t base = (page_no == 1) ? 100 : 0;
     if (base + 8 > page_size) return ph;
 
@@ -62,8 +59,8 @@ PageHeader parse_page_header(const uint8_t* page, size_t page_size, uint32_t pag
     ph.first_freeblock = r.u16();
     ph.num_cells = r.u16();
     uint16_t ccs = r.u16();
-    ph.cell_content_start = ccs; // 0 => 65536, handled by callers
-    r.u8(); // fragmented free bytes
+    ph.cell_content_start = ccs; // 0 means 65536, callers handle it
+    r.u8(); // fragmented free bytes, don't care
 
     bool interior = (ph.kind == PageKind::InteriorIndex ||
                      ph.kind == PageKind::InteriorTable);

@@ -107,49 +107,63 @@ std::string csv_escape(const std::string& s) {
 
 } // namespace
 
+/// @brief Build a JSON node for one record. Shared between write_json
+/// (which collects them into an array) and write_json_one (which emits one
+/// per line).
+/// @param r Record to render.
+/// @return A nlohmann::json object describing r.
+json record_to_json(const Record& r) {
+    json jr;
+    jr["table"] = r.table;
+    if (!r.artifact.empty()) jr["artifact"] = r.artifact;
+    if (r.rowid) jr["rowid"] = *r.rowid;
+    jr["suspect"] = r.suspect;
+
+    json prov;
+    prov["source_file"] = r.prov.source_file;
+    prov["origin"]      = r.prov.origin;
+    prov["page_no"]     = r.prov.page_no;
+    prov["byte_offset"] = r.prov.byte_offset;
+    if (r.prov.wal_frame) prov["wal_frame"] = *r.prov.wal_frame;
+    jr["provenance"]       = prov;
+
+    json vals = json::array();
+    for (const auto& v : r.values) vals.push_back(value_to_json(v));
+    jr["values"]        = vals;
+
+    if (!r.column_names.empty() &&
+        r.column_names.size() == r.values.size()) {
+        json cols = json::object();
+        for (auto i = 0; i < r.values.size(); ++i)
+            cols[r.column_names[i]] = value_to_json(r.values[i]);
+        jr["column_names"] = cols;
+    }
+
+    if (!r.decoded.empty()) {
+        json dec = json::object();
+        for (const auto& kv : r.decoded) dec[kv.first] = kv.second;
+        jr["decoded"] = dec;
+    }
+    return jr;
+}
+
+
 void write_json(std::ostream& os, const std::vector<Record>& records) {
     json arr = json::array();
-    for (const auto& r : records) {
-        json jr;
-        jr["table"] = r.table;
-        if (!r.artifact.empty()) jr["artifact"] = r.artifact;
-        if (r.rowid) jr["rowid"] = *r.rowid;
-        jr["suspect"] = r.suspect;
-
-        json prov;
-        prov["source_file"] = r.prov.source_file;
-        prov["origin"]      = to_string(r.prov.origin);
-        prov["page_no"]     = r.prov.page_no;
-        prov["byte_offset"] = r.prov.byte_offset;
-        if (r.prov.wal_frame) prov["wal_frame"] = *r.prov.wal_frame;
-        jr["provenance"] = prov;
-
-        // Always emit positional values. If we know column names, also
-        // emit a "columns" object, which is what makes matched artifacts
-        // readable (address, body, date, ...).
-        json vals = json::array();
-        for (const auto& v : r.values) vals.push_back(value_to_json(v));
-        jr["values"] = vals;
-
-        if (!r.column_names.empty() &&
-            r.column_names.size() == r.values.size()) {
-            json cols = json::object();
-            for (size_t i = 0; i < r.values.size(); ++i)
-                cols[r.column_names[i]] = value_to_json(r.values[i]);
-            jr["columns"] = cols;
-        }
-
-        // Readable decodings (timestamps, enum labels, durations)
-        if (!r.decoded.empty()) {
-            json dec = json::object();
-            for (const auto& kv : r.decoded) dec[kv.first] = kv.second;
-            jr["decoded"] = dec;
-        }
-        arr.push_back(std::move(jr));
-    }
+    for (const auto& r : records) arr.push_back(record_to_json(r));
     // error_handler_t::replace so we never throw on stray invalid bytes
     // that snuck past the value-level handling
     os << arr.dump(2, ' ', false, json::error_handler_t::replace) << "\n";
+}
+
+///@brief One compact object per line. indent =-1 kees each record
+/// on a single line so tools like grep can stream it. Might be useful
+/// probably not.
+void write_json_one(std::ostream& os, const std::vector<Record>& records) {
+    for (const auto& r : records) {
+        json jr = record_to_json(r);
+        os << jr.dump(2, ' ', false, json::error_handler_t::replace) << std::endl;
+    }
 }
 
 void write_csv(std::ostream& os, const std::vector<Record>& records) {

@@ -33,7 +33,8 @@ constexpr const char* kUsage =
 "                       out of it (libtsk if built with -DUSE_TSK, else carve)\n"
 "  --wal <path>         explicit -wal file (default: <input>-wal if present)\n"
 "  --output <dir>       output directory (default: ./out)\n"
-"  --format json|csv    output format for records (default: json)\n"
+"  --format json|jsonl|csv  output format for records (default: json)\n"
+"                       jsonl = one JSON object per line (NDJSON)\n"
 "  --live               include live records in output (default: deleted only)\n"
 "  --table <name>       restrict output to records labelled <name>\n"
 "  --report             also write a human-readable report to stderr & file\n"
@@ -93,8 +94,8 @@ Args parse_args(int argc, char** argv) {
     }
     if (pos.size() != 1) die_args("exactly one input file is required");
     a.input = pos[0];
-    if (a.format != "json" && a.format != "csv")
-        die_args("--format must be json or csv");
+    if (a.format != "json" && a.format != "jsonl" && a.format != "csv")
+        die_args("--format must be json, jsonl, or csv");
     return a;
 }
 
@@ -269,12 +270,15 @@ int main(int argc, char** argv) {
 
         // Write outputs
         fs::create_directories(args.output);
-        std::string ext = (args.format == "json") ? ".json" : ".csv";
+        std::string ext = ".csv";
+        if (args.format == "json")        ext = ".json";
+        else if (args.format == "jsonl")  ext = ".jsonl";
         std::string rec_path = (fs::path(args.output) / ("records" + ext)).string();
         std::ofstream rf(rec_path, std::ios::binary);
         if (!rf) throw ParseError("cannot write output: " + rec_path);
-        if (args.format == "json") write_json(rf, out);
-        else                        write_csv(rf, out);
+        if (args.format == "json")        write_json(rf, out);
+        else if (args.format == "jsonl")  write_jsonl(rf, out);
+        else                              write_csv(rf, out);
         rf.close();
 
         if (args.report) {

@@ -159,7 +159,7 @@ void write_json(std::ostream& os, const std::vector<Record>& records) {
 ///@brief One compact object per line. indent =-1 kees each record
 /// on a single line so tools like grep can stream it. Might be useful
 /// probably not.
-void write_json_one(std::ostream& os, const std::vector<Record>& records) {
+void write_jsonl(std::ostream& os, const std::vector<Record>& records) {
     for (const auto& r : records) {
         json jr = record_to_json(r);
         os << jr.dump(2, ' ', false, json::error_handler_t::replace) << std::endl;

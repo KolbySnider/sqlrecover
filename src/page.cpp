@@ -23,19 +23,35 @@ DbHeader parse_db_header(const std::vector<uint8_t>& db) {
 
     ByteReader r(db.data(), db.size(), 16);
     uint16_t ps = r.u16();
-    // page_size == 1 means 65536
     h.page_size = (ps == 1) ? 65536u : ps;
+    // If page_size is bogus, fall back to 4096 (Android default, and the
+    // most common value in the wild). Better to scan with a guess than
+    // refuse the file outright.
     if (h.page_size < 512 || (h.page_size & (h.page_size - 1)) != 0)
-        return h;
+        h.page_size = 4096;
 
-    r.seek(20); h.reserved_per_page = r.u8();
-    r.seek(28); h.page_count = r.u32();
-    r.seek(32); h.freelist_trunk = r.u32();
-                h.freelist_count = r.u32();
-    r.seek(56); uint32_t enc = r.u32();
-    h.encoding = (enc == 2) ? TextEncoding::Utf16le
-               : (enc == 3) ? TextEncoding::Utf16be
-                            : TextEncoding::Utf8;
+    // Everything past here is best-effort. Bad values get defaulted
+    // instead of failing the whole parse, since the slack scanner can
+    // work without them.
+    try {
+        r.seek(20); h.reserved_per_page = r.u8();
+        r.seek(28); h.page_count = r.u32();
+        r.seek(32); h.freelist_trunk = r.u32();
+        h.freelist_count = r.u32();
+        r.seek(56); uint32_t enc = r.u32();
+        h.encoding = (enc == 2) ? TextEncoding::Utf16le
+                   : (enc == 3) ? TextEncoding::Utf16be
+                                : TextEncoding::Utf8;
+    } catch (...) {
+        // Header bytes past page_size couldn't be read. Leave the
+        // remaining fields at their zero defaults and press on.
+    }
+
+    // Sanity-bound the freelist so a corrupt count doesn't make
+    // recover_freelist walk into nonsense pages.
+    uint32_t max_pages = static_cast<uint32_t>(db.size() / h.page_size);
+    if (h.freelist_trunk > max_pages) h.freelist_trunk = 0;
+    if (h.freelist_count > max_pages) h.freelist_count = 0;
 
     h.valid = true;
     return h;

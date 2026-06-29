@@ -251,37 +251,40 @@ void recover_slack(const Database& db,
         const uint8_t* page;
         try { page = db.page(pg); } catch (...) { continue; }
         PageHeader ph = parse_page_header(page, psize, pg);
-        if (!ph.valid || ph.kind != PageKind::LeafTable) continue;
 
-        uint32_t ccs = ph.cell_content_start == 0 ? 65536 : ph.cell_content_start;
-        size_t ptr_array_end = (pg == 1 ? 100 : 0) + ph.header_size +
-                               size_t(ph.num_cells) * 2;
+        if (ph.valid && ph.kind == PageKind::LeafTable) {
+            // Structured scan: trust the page header to point us at the
+            // slack gap and freeblock chain.
+            uint32_t ccs = ph.cell_content_start == 0 ? 65536 : ph.cell_content_start;
+            size_t ptr_array_end = (pg == 1 ? 100 : 0) + ph.header_size +
+                                   size_t(ph.num_cells) * 2;
 
-        // (a) Unallocated gap between the cell-pointer array and the live
-        // content region. Partial repacks can leave remnants here.
-        if (ccs > ptr_array_end)
-            scan_page_for_cells(db, pg, ptr_array_end, ccs, Origin::Slack, sink);
+            if (ccs > ptr_array_end)
+                scan_page_for_cells(db, pg, ptr_array_end, ccs, Origin::Slack, sink);
 
-        // (b) Freeblock chain. When a cell gets deleted, its space goes onto
-        // a singly-linked list of freeblocks inside the content region.
-        // Layout per freeblock: [next(2)][size(2)][stale bytes...]. The
-        // stale bytes are the deleted cell's old content. This is where
-        // most recoverable deleted rows actually live.
-        uint16_t fb = ph.first_freeblock;
-        std::set<uint16_t> seen;
-        while (fb != 0 && size_t(fb) + 4 <= psize) {
-            if (!seen.insert(fb).second) break; // cycle guard
-            ByteReader r(page, psize, fb);
-            uint16_t next = r.u16();
-            uint16_t size = r.u16();
-            if (size < 4) break;
-            size_t block_end = std::min<size_t>(size_t(fb) + size, db.usable_size());
-            // First 4 bytes of the freeblock are the link header (which
-            // overwrote the cell's payload-length + rowid varints). The
-            // record header + body that followed are still intact, so we
-            // start scanning right after the link.
-            scan_range_for_records(db, pg, fb + 4, block_end, Origin::Slack, sink);
-            fb = next;
+            uint16_t fb = ph.first_freeblock;
+            std::set<uint16_t> seen;
+            while (fb != 0 && size_t(fb) + 4 <= psize) {
+                if (!seen.insert(fb).second) break;
+                ByteReader r(page, psize, fb);
+                uint16_t next = r.u16();
+                uint16_t size = r.u16();
+                if (size < 4) break;
+                size_t block_end = std::min<size_t>(size_t(fb) + size, db.usable_size());
+                scan_range_for_records(db, pg, fb + 4, block_end, Origin::Slack, sink);
+                fb = next;
+            }
+        } else {
+            // Header didn't validate as a leaf table page. Could be a
+            // damaged leaf, an index, an overflow page, or pure garbage.
+            // We don't know the layout, so brute-force scan the whole
+            // page. Try both decoders because we don't know which framing
+            // survived: full cells if the cell envelope is intact, bare
+            // records if those varints got clobbered.
+            size_t start = (pg == 1 ? 100 : 0);  // skip db header on page 1
+            size_t end   = db.usable_size();
+            scan_page_for_cells   (db, pg, start, end, Origin::Slack, sink);
+            scan_range_for_records(db, pg, start, end, Origin::Slack, sink);
         }
     }
 }

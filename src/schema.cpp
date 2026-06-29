@@ -1,6 +1,6 @@
-#include "sqlrecover/schema.hpp"
-#include "sqlrecover/database.hpp"
-#include "sqlrecover/btree.hpp"
+#include "schema.hpp"
+#include "database.hpp"
+#include "btree.hpp"
 #include <cctype>
 
 namespace sqlrecover {

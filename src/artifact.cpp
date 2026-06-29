@@ -1,4 +1,4 @@
-#include "sqlrecover/artifact.hpp"
+#include "artifact.hpp"
 #include <ctime>
 #include <cstdio>
 

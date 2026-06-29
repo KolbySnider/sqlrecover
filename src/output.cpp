@@ -1,4 +1,4 @@
-#include "sqlrecover/output.hpp"
+#include "output.hpp"
 #include "../third_party/json.hpp"
 #include <iomanip>
 #include <sstream>

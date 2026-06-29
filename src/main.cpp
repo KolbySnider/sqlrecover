@@ -1,13 +1,13 @@
-#include "sqlrecover/database.hpp"
-#include "sqlrecover/btree.hpp"
-#include "sqlrecover/recover.hpp"
-#include "sqlrecover/wal.hpp"
-#include "sqlrecover/schema.hpp"
-#include "sqlrecover/artifact.hpp"
-#include "sqlrecover/output.hpp"
-#include "sqlrecover/timeline.hpp"
-#include "sqlrecover/image.hpp"
-#include "sqlrecover/util.hpp"
+#include "database.hpp"
+#include "btree.hpp"
+#include "recover.hpp"
+#include "wal.hpp"
+#include "schema.hpp"
+#include "artifact.hpp"
+#include "output.hpp"
+#include "timeline.hpp"
+#include "image.hpp"
+#include "util.hpp"
 
 #include <iostream>
 #include <fstream>

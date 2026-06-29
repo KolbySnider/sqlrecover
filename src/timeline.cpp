@@ -1,5 +1,5 @@
-#include "sqlrecover/timeline.hpp"
-#include "sqlrecover/artifact.hpp"
+#include "timeline.hpp"
+#include "artifact.hpp"
 #include "../third_party/json.hpp"
 #include <algorithm>
 #include <set>

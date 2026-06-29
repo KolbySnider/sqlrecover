@@ -13,7 +13,7 @@
 
 #include <string>
 #include <vector>
-#include "sqlrecover/types.hpp"
+#include "types.hpp"
 
 namespace sqlrecover {
 

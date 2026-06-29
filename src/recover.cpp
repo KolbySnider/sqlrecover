@@ -1,9 +1,9 @@
-#include "sqlrecover/recover.hpp"
-#include "sqlrecover/database.hpp"
-#include "sqlrecover/page.hpp"
-#include "sqlrecover/varint.hpp"
-#include "sqlrecover/serial.hpp"
-#include "sqlrecover/util.hpp"
+#include "recover.hpp"
+#include "database.hpp"
+#include "page.hpp"
+#include "varint.hpp"
+#include "serial.hpp"
+#include "util.hpp"
 #include <set>
 #include <algorithm>
 

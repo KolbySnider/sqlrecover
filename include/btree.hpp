@@ -5,8 +5,8 @@
 
 #include <vector>
 #include <functional>
-#include "sqlrecover/types.hpp"
-#include "sqlrecover/page.hpp"
+#include "types.hpp"
+#include "page.hpp"
 
 namespace sqlrecover {
 

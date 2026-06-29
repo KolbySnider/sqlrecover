@@ -5,7 +5,7 @@
 /// byte (if you get there) contributes all 8 of its bits. IMPORTANT
 
 #include <cstdint>
-#include "sqlrecover/util.hpp"
+#include "util.hpp"
 
 namespace sqlrecover {
 

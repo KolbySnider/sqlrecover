@@ -1,5 +1,5 @@
-#include "sqlrecover/image.hpp"
-#include "sqlrecover/util.hpp"
+#include "image.hpp"
+#include "util.hpp"
 #include <fstream>
 #include <iostream>
 #include <filesystem>

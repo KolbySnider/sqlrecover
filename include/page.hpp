@@ -5,8 +5,8 @@
 
 #include <cstdint>
 #include <vector>
-#include "sqlrecover/types.hpp"
-#include "sqlrecover/serial.hpp"
+#include "types.hpp"
+#include "serial.hpp"
 
 namespace sqlrecover {
 

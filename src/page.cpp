@@ -1,5 +1,5 @@
-#include "sqlrecover/page.hpp"
-#include "sqlrecover/util.hpp"
+#include "page.hpp"
+#include "util.hpp"
 #include <cstring>
 
 namespace sqlrecover {

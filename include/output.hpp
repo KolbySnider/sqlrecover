@@ -6,7 +6,7 @@
 #include <vector>
 #include <string>
 #include <ostream>
-#include "sqlrecover/types.hpp"
+#include "types.hpp"
 
 namespace sqlrecover {
 

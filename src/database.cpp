@@ -1,5 +1,5 @@
-#include "sqlrecover/database.hpp"
-#include "sqlrecover/util.hpp"
+#include "database.hpp"
+#include "util.hpp"
 
 namespace sqlrecover {
 

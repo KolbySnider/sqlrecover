@@ -54,45 +54,41 @@ public:
             throw ParseError("read past end of buffer");
     }
 
+    /// @brief Read an N-byte big-endian unsigned integer and advance.
+    /// @tparam T Return type; must be large enough to hold N bytes.
+    /// @tparam N Number of bytes to consume (defaults to sizeof(T)).
+    /// @return The decoded value zero-extended to T.
+    /// @throws ParseError on overrun.
+    template <typename T, size_t N = sizeof(T)>
+    T read_be() {
+        static_assert(N <= sizeof(T), "N bytes won't fit in T");
+        require(N);
+        T v = 0;
+        for (size_t i = 0; i < N; ++i)
+            v = (v << 8) | T(data_[pos_ + i]);
+        pos_ += N;
+        return v;
+    }
+
     /// @brief Read a uint8_t and advance.
     /// @return The byte at the current position.
     /// @throws ParseError on overrun.
-    uint8_t u8() {
-        require(1);
-        return data_[pos_++];
-    }
+    uint8_t  u8()  { return read_be<uint8_t>(); }
 
     /// @brief Read a big-endian uint16_t and advance.
     /// @return The decoded value.
     /// @throws ParseError on overrun.
-    uint16_t u16() {
-        require(2);
-        uint16_t v = (uint16_t(data_[pos_]) << 8) | data_[pos_ + 1];
-        pos_ += 2;
-        return v;
-    }
+    uint16_t u16() { return read_be<uint16_t>(); }
 
     /// @brief Read a big-endian 24-bit unsigned and advance.
     /// @return The decoded value zero-extended to 32 bits.
     /// @throws ParseError on overrun.
-    uint32_t u24() {
-        require(3);
-        uint32_t v = (uint32_t(data_[pos_]) << 16) |
-                     (uint32_t(data_[pos_ + 1]) << 8) | data_[pos_ + 2];
-        pos_ += 3;
-        return v;
-    }
+    uint32_t u24() { return read_be<uint32_t, 3>(); }
 
     /// @brief Read a big-endian uint32_t and advance.
     /// @return The decoded value.
     /// @throws ParseError on overrun.
-    uint32_t u32() {
-        require(4);
-        uint32_t v = (uint32_t(data_[pos_]) << 24) | (uint32_t(data_[pos_ + 1]) << 16) |
-                     (uint32_t(data_[pos_ + 2]) << 8) | data_[pos_ + 3];
-        pos_ += 4;
-        return v;
-    }
+    uint32_t u32() { return read_be<uint32_t>(); }
 
     /// @brief Pointer at the current read position.
     /// @return data() + pos().

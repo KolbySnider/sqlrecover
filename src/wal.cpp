@@ -1,9 +1,9 @@
-#include "sqlrecover/wal.hpp"
-#include "sqlrecover/database.hpp"
-#include "sqlrecover/page.hpp"
-#include "sqlrecover/varint.hpp"
-#include "sqlrecover/serial.hpp"
-#include "sqlrecover/util.hpp"
+#include "wal.hpp"
+#include "database.hpp"
+#include "page.hpp"
+#include "varint.hpp"
+#include "serial.hpp"
+#include "util.hpp"
 #include <fstream>
 
 namespace sqlrecover {
@@ -67,7 +67,7 @@ WalStats recover_wal(const Database& db, const std::string& wal_path,
                      const std::function<void(Record&&)>& sink) {
     WalStats st;
     std::vector<uint8_t> wal;
-    try { wal = read_file(wal_path); } catch (...) { return st; }
+    try { wal = read_file(wal_path); } catch (...) { return st; } // 1 liner why not
     if (wal.size() < 32) return st;
 
     // WAL header is 32 bytes. Magic 0x377f0682 (LE host) / 0x377f0683 (BE).

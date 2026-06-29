@@ -1,8 +1,8 @@
-#include "sqlrecover/btree.hpp"
-#include "sqlrecover/database.hpp"
-#include "sqlrecover/varint.hpp"
-#include "sqlrecover/serial.hpp"
-#include "sqlrecover/util.hpp"
+#include "btree.hpp"
+#include "database.hpp"
+#include "varint.hpp"
+#include "serial.hpp"
+#include "util.hpp"
 #include <set>
 
 namespace sqlrecover {

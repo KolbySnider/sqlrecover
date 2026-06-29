@@ -4,7 +4,7 @@
 
 #include <vector>
 #include <string>
-#include "sqlrecover/page.hpp"
+#include "page.hpp"
 
 namespace sqlrecover {
 

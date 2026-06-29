@@ -16,7 +16,7 @@
 
 #include <vector>
 #include <functional>
-#include "sqlrecover/types.hpp"
+#include "types.hpp"
 
 namespace sqlrecover {
 

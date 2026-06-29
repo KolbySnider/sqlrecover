@@ -8,7 +8,7 @@
 #include <vector>
 #include <string>
 #include <cstdint>
-#include "sqlrecover/types.hpp"
+#include "types.hpp"
 
 namespace sqlrecover {
 

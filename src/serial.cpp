@@ -1,5 +1,5 @@
-#include "sqlrecover/serial.hpp"
-#include "sqlrecover/varint.hpp"
+#include "serial.hpp"
+#include "varint.hpp"
 #include <cstring>
 
 namespace sqlrecover {

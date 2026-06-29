@@ -1,4 +1,4 @@
-#include "sqlrecover/util.hpp"
+#include "util.hpp"
 #include <fstream>
 
 namespace sqlrecover {

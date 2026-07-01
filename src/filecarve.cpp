@@ -27,6 +27,7 @@ struct Signature {
 /// @brief Structured formats only: each has either a header size field or
 /// a well-defined terminator, keeping false-positive risk low. Formats
 /// with no magic bytes at all (plain text) aren't covered by this table.
+//  I made this as I thought file waking nts4 
 const std::vector<Signature>& signature_table() {
     static const std::vector<Signature> table = {
         {"jpeg", "jpg", {0xFF, 0xD8, 0xFF}, 0},
@@ -87,10 +88,6 @@ bool size_from_header_field(std::ifstream& f, uint64_t pos, const char* label, u
     if (std::strcmp(label, "bmp") == 0) {
         // "BM" alone is a weak, easily-coincidental 2-byte magic. Real
         // BMP files always have both reserved fields (bytes 6-9) zero;
-        // checking that rejects false positives that a bare "BM" match
-        // would otherwise wave through (confirmed against a real 56MB/
-        // 144MB false hit this session, both with non-zero reserved
-        // bytes).
         if (read_at(f, pos, hdr, 10) < 10) return false;
         if (hdr[6] != 0 || hdr[7] != 0 || hdr[8] != 0 || hdr[9] != 0) return false;
         uint64_t sz = read_le32(hdr + 2);

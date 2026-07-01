@@ -20,7 +20,8 @@ struct TimelineEvent {
     int64_t      epoch_ms = 0;       ///< sort key
     std::string  iso_utc;            ///< pretty timestamp
     std::string  artifact;
-    std::string  summary;            ///< one-line description
+    std::string  summary;            ///< one-line description, long text truncated
+    std::string  summary_full;       ///< same, but with text values untruncated
     Origin       origin = Origin::Live;
     bool         recovered = false;  ///< true unless this is from a live row
     Provenance   prov;

@@ -13,17 +13,19 @@ namespace {
 
 /// @brief Compact rendering of a value for use inside a summary line.
 /// @param v Value to render.
-/// @return Short, single-line stringification.
-std::string brief(const Value& v) {
+/// @param truncate Cap TEXT values at 60 chars with a trailing "..." when
+///                 true; return them in full when false.
+/// @return Single-line stringification.
+std::string brief(const Value& v, bool truncate) {
     switch (v.type) {
         case Value::Type::Null: return "";
         case Value::Type::Int:  return std::to_string(v.i);
         case Value::Type::Real: { std::ostringstream o; o << v.r; return o.str(); }
         case Value::Type::Text: {
-            // One line, bounded length
+            // One line; bounded length only when the caller wants a preview
             std::string s = v.text;
             for (char& c : s) if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-            if (s.size() > 60) s = s.substr(0, 57) + "...";
+            if (truncate && s.size() > 60) s = s.substr(0, 57) + "...";
             return s;
         }
         case Value::Type::Blob: return "<blob:" + std::to_string(v.blob.size()) + "B>";
@@ -37,9 +39,11 @@ std::string brief(const Value& v) {
 /// @param r Record to summarise.
 /// @param tl Timeline metadata for the matched artifact.
 /// @param interps Per-column interpreters for the matched artifact.
+/// @param truncate Cap long TEXT values (used for the terminal-friendly
+///                 summary); pass false for a full-text variant.
 /// @return Two-space-separated summary string.
 std::string make_summary(const Record& r, const ArtifactTimeline& tl,
-                         const std::vector<Interp>& interps) {
+                         const std::vector<Interp>& interps, bool truncate) {
     std::ostringstream o;
     bool first = true;
     for (size_t idx : tl.summary_indices) {
@@ -53,7 +57,7 @@ std::string make_summary(const Record& r, const ArtifactTimeline& tl,
         if (in != Interp::None && decode_value(v, in, decoded))
             piece = decoded;            // e.g. "sent", "outgoing", "7s"
         else
-            piece = brief(v);
+            piece = brief(v, truncate);
 
         if (piece.empty()) continue;
         if (!first) o << "  ";
@@ -91,7 +95,8 @@ std::vector<TimelineEvent> build_timeline(const std::vector<Record>& records) {
         ev.epoch_ms  = epoch_ms;
         ev.iso_utc   = iso;
         ev.artifact  = r.artifact;
-        ev.summary   = make_summary(r, tl, interps);
+        ev.summary      = make_summary(r, tl, interps, true);
+        ev.summary_full = make_summary(r, tl, interps, false);
         ev.origin    = r.prov.origin;
         ev.recovered = (r.prov.origin != Origin::Live);
         ev.prov      = r.prov;
@@ -148,8 +153,9 @@ void write_timeline_json(std::ostream& os, const std::vector<TimelineEvent>& tl)
         j["time_utc"]  = ev.iso_utc;
         j["epoch_ms"]  = ev.epoch_ms;
         j["artifact"]  = ev.artifact;
-        j["summary"]   = ev.summary;
-        j["recovered"] = ev.recovered;
+        j["summary"]      = ev.summary;
+        j["summary_full"] = ev.summary_full;
+        j["recovered"]    = ev.recovered;
         json prov;
         prov["source_file"] = ev.prov.source_file;
         prov["origin"]      = to_string(ev.prov.origin);

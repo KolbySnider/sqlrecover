@@ -33,6 +33,7 @@ enum class Interp {
     SmsType,        ///< SMS type code  -> inbox/sent/draft/...
     CallType,       ///< call type code -> incoming/outgoing/missed/...
     BoolFlag,       ///< 0/1            -> "false"/"true"
+    MmsBox,         ///< MMS msg_box code -> inbox/sent/drafts/outbox
 };
 
 /// @brief One column in a known artifact: name + type constraint +

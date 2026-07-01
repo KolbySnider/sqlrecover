@@ -286,6 +286,27 @@ void write_report(std::ostream& os, const RunSummary& s) {
        << "Note: freelist, slack and wal records are residual data and are\n"
        << "recovered heuristically. 'suspect' rows parsed but didn't pass\n"
        << "the strength checks, so eyeball them before trusting.\n";
+
+    if (s.files_recovered > 0) {
+        os << "\nfiles recovered (--carve-files)\n"
+           << "-------------------------------\n"
+           << "  total           : " << s.files_recovered << "\n";
+        for (const auto& kv : s.files_by_type)
+            os << "  " << std::left << std::setw(16) << kv.first << ": " << kv.second << "\n";
+    }
+}
+
+void write_recovered_files_json(std::ostream& os, const std::vector<RecoveredFile>& files) {
+    json arr = json::array();
+    for (const auto& f : files) {
+        json j;
+        j["path"]   = f.path;
+        j["kind"]   = f.kind;
+        j["offset"] = f.offset;
+        j["size"]   = f.size;
+        arr.push_back(std::move(j));
+    }
+    os << arr.dump(2, ' ', false, json::error_handler_t::replace) << "\n";
 }
 
 } // namespace sqlrecover

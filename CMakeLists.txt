@@ -26,6 +26,7 @@ add_executable(sqlrecover
     src/wal.cpp
     src/output.cpp
     src/image.cpp
+    src/filecarve.cpp
 )
 
 target_include_directories(sqlrecover PRIVATE

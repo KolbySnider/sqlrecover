@@ -7,6 +7,7 @@
 #include "output.hpp"
 #include "timeline.hpp"
 #include "image.hpp"
+#include "filecarve.hpp"
 #include "util.hpp"
 
 #include <iostream>
@@ -34,6 +35,8 @@ constexpr const char* kUsage =
 "options:\n"
 "  --image              treat input as a raw partition image; carve .db files\n"
 "                       out of it (libtsk if built with -DUSE_TSK, else carve)\n"
+"  --carve-files        also carve generic files (jpeg/png/gif/bmp/pdf/mp4/wav)\n"
+"                       out of the image by signature; only with --image\n"
 "  --wal <path>         explicit -wal file (default: <input>-wal if present)\n"
 "  --output <dir>       output directory (default: ./out)\n"
 "  --format json|jsonl|csv  output format for records (default: json)\n"
@@ -62,6 +65,7 @@ struct Args {
     bool verbose = false;
     bool image = false;
     bool timeline = false;
+    bool carve_files = false;
     unsigned    jobs = 0; ///< 0 = auto (hardware_concurrency)
 };
 
@@ -92,6 +96,7 @@ Args parse_args(int argc, char** argv) {
         else if (s == "--table")   a.table = next("--table");
         else if (s == "--live")    a.live = true;
         else if (s == "--image")   a.image = true;
+        else if (s == "--carve-files") a.carve_files = true;
         else if (s == "--timeline") a.timeline = true;
         else if (s == "--report")  a.report = true;
         else if (s == "-v" || s == "--verbose") a.verbose = true;
@@ -165,7 +170,7 @@ void label_records(std::vector<Record>& recs, const std::vector<TableDef>& table
 /// @brief Everything one worker produces for one candidate db. Kept
 /// separate per-db so workers never touch shared state while running;
 /// a single-threaded pass afterward merges these in original db_paths
-/// order, reproducing exactly what the old sequential loop did.
+/// order
 struct DbOutcome {
     std::vector<Record> live;
     std::vector<Record> residual;
@@ -200,6 +205,7 @@ int main(int argc, char** argv) {
         // Figure out which dbs to process. For a raw image, carve every
         // SQLite db out first; otherwise it's just the one input file.
         std::vector<std::string> db_paths;
+        std::vector<RecoveredFile> recovered_files;
         if (args.image) {
             std::string scratch = (fs::path(args.output) / "carved").string();
             log("carving databases from image " + args.input);
@@ -207,6 +213,13 @@ int main(int argc, char** argv) {
             if (db_paths.empty())
                 throw ParseError("no SQLite databases found in image: " + args.input);
             log("carved " + std::to_string(db_paths.size()) + " database(s)");
+
+            if (args.carve_files) {
+                std::string files_dir = (fs::path(args.output) / "recovered_files").string();
+                log("carving generic files from image " + args.input);
+                recovered_files = carve_files(args.input, files_dir, args.verbose, want_jobs);
+                log("recovered " + std::to_string(recovered_files.size()) + " file(s)");
+            }
         } else {
             db_paths.push_back(args.input);
         }
@@ -362,6 +375,8 @@ int main(int argc, char** argv) {
             if (r.suspect) ++sum.suspect;
             if (!r.artifact.empty()) ++sum.artifacts;
         }
+        sum.files_recovered = recovered_files.size();
+        for (const auto& f : recovered_files) ++sum.files_by_type[f.kind];
 
         // Write outputs
         fs::create_directories(args.output);
@@ -381,6 +396,14 @@ int main(int argc, char** argv) {
             std::ofstream repf(rep_path, std::ios::binary);
             if (repf) write_report(repf, sum);
             write_report(std::cerr, sum);
+        }
+
+        if (args.carve_files) {
+            std::string manifest_path = (fs::path(args.output) / "recovered_files.json").string();
+            std::ofstream mf(manifest_path, std::ios::binary);
+            if (mf) write_recovered_files_json(mf, recovered_files);
+            std::cerr << "[+] wrote " << recovered_files.size()
+                      << " recovered file(s) to " << manifest_path << "\n";
         }
 
         if (args.timeline) {

@@ -5,8 +5,10 @@
 
 #include <vector>
 #include <string>
+#include <map>
 #include <ostream>
 #include "types.hpp"
+#include "filecarve.hpp"
 
 namespace sqlrecover {
 
@@ -23,6 +25,8 @@ struct RunSummary {
     size_t      suspect = 0;
     size_t      artifacts = 0;
     size_t      failed = 0;    ///< candidate dbs that errored out and were skipped
+    size_t      files_recovered = 0;         ///< generic files carved with --carve-files
+    std::map<std::string, size_t> files_by_type; ///< e.g. "jpeg" -> 12
 };
 
 /// @brief Write records as JSON. Per-record formatting (UTF-8 validation,
@@ -52,5 +56,10 @@ void write_csv(std::ostream& os, const std::vector<Record>& records,
 /// @param[out] os Stream to write to.
 /// @param s Aggregated counts for the run.
 void write_report(std::ostream& os, const RunSummary& s);
+
+/// @brief Write the --carve-files manifest as a JSON array.
+/// @param[out] os Stream to write to.
+/// @param files Recovered files to list.
+void write_recovered_files_json(std::ostream& os, const std::vector<RecoveredFile>& files);
 
 } // namespace sqlrecover

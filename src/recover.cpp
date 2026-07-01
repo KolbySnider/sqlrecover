@@ -68,11 +68,7 @@ bool record_looks_real(const std::vector<Value>& vals) {
         if (v.type != Value::Type::Null) ++non_null;
         if (v.type == Value::Type::Text && !v.text.empty()) {
             ++text_cols;
-            size_t printable = 0;
-            for (unsigned char c : v.text)
-                if (c == '\t' || c == '\n' || (c >= 0x20 && c < 0x7f) || c >= 0x80)
-                    ++printable;
-            if (printable * 100 >= v.text.size() * 90) ++printable_text;
+            if (looks_like_text(v.text)) ++printable_text;
         }
     }
     if (non_null == 0) return false;

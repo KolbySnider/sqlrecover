@@ -17,4 +17,13 @@ std::vector<uint8_t> read_file(const std::string& path) {
     return buf;
 }
 
+bool looks_like_text(const std::string& s) {
+    if (s.empty()) return false;
+    size_t printable = 0;
+    for (unsigned char c : s)
+        if (c == '\t' || c == '\n' || (c >= 0x20 && c < 0x7f) || c >= 0x80)
+            ++printable;
+    return printable * 100 >= s.size() * 90;
+}
+
 } // namespace sqlrecover

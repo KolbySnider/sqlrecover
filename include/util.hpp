@@ -110,4 +110,12 @@ private:
 /// @throws ParseError if the file can't be opened, sized, or read.
 std::vector<uint8_t> read_file(const std::string& path);
 
+/// @brief Is this mostly printable text, as opposed to binary garbage
+/// (or embedded-NUL padding) that happens to decode under SQLite's TEXT
+/// storage class? Used to tell real strings apart from noise wherever a
+/// decoded row is judged "does this look like real data".
+/// @param s Candidate text.
+/// @return true if s is non-empty and at least 90% printable bytes.
+bool looks_like_text(const std::string& s);
+
 } // namespace sqlrecover

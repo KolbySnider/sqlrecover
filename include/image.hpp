@@ -26,11 +26,14 @@ namespace sqlrecover {
 /// @param out_dir Scratch directory for carved .db files (created if
 ///                missing).
 /// @param verbose If true, log each carve to stderr.
+/// @param workers Worker threads for signature carving (scan and
+///                extraction phases). At least 1.
 /// @return Paths of the carved .db files.
 /// @throws ParseError if the image can't be opened during signature
 ///         carving.
 std::vector<std::string> carve_databases(const std::string& image_path,
                                           const std::string& out_dir,
-                                          bool verbose);
+                                          bool verbose,
+                                          unsigned workers = 1);
 
 } // namespace sqlrecover

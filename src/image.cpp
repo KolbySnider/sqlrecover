@@ -5,6 +5,9 @@
 #include <filesystem>
 #include <cstring>
 #include <algorithm>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 namespace fs = std::filesystem;
 
@@ -25,44 +28,54 @@ uint32_t header_page_size(const uint8_t* p, size_t avail) {
     return ps;
 }
 
-/// @brief Streaming signature carver. Reads the image in chunks so giant
-/// images (full flash dumps) don't have to fit in RAM.
+/// @brief A candidate SQLite header found during the scan phase.
+struct Hit {
+    uint64_t pos;        ///< absolute file offset
+    uint32_t page_size;
+    uint64_t span;        ///< bytes to extract (already clamped)
+    bool     clamped;     ///< true if span is a guessed fallback ceiling,
+                          ///< not a trustworthy page_count * page_size
+};
+
+/// @brief Scan one byte range of the image for SQLite headers. Each
+/// caller (one per worker thread) gets its own stream, since ifstream
+/// isn't safe to share across threads.
 ///
 /// Notes:
 ///   - buf0_file_pos always tracks the absolute file offset of buf[0], so
 ///     hit_pos = buf0_file_pos + i works regardless of carry state.
-///   - Each hit is re-read via a second ifstream so the main scan stream
-///     stays put.
 ///   - Hits have to be 512-byte aligned; unaligned ones are embedded
 ///     strings, not real db headers.
-///   - The OVERLAP carry catches a magic that straddles a chunk boundary.
-///   - Static and reinterpereted casts are probably unecessary but nice for assuredness
+///   - The OVERLAP carry catches a magic that straddles a chunk boundary
+///     *within* this range; a magic straddling the range/range boundary
+///     is simply left to whichever range it actually starts in (we bail
+///     out of the loop the moment hit_pos reaches `end`), so ranges never
+///     need to coordinate with each other.
 ///
 /// @param image_path Path to the raw image.
-/// @param out_dir Output directory for carved .db files.
-/// @param verbose If true, log each carve to stderr.
-/// @return Paths of the carved .db files.
+/// @param start Absolute byte offset to start scanning (inclusive).
+/// @param end Absolute byte offset to stop at (exclusive) - hits at or
+///            past this offset belong to the next range, not this one.
+/// @return Hits found strictly within [start, end).
 /// @throws ParseError if the image can't be opened.
-std::vector<std::string> carve_by_signature(const std::string& image_path,
-                                             const std::string& out_dir,
-                                             bool verbose) {
+std::vector<Hit> scan_range(const std::string& image_path, uint64_t start, uint64_t end) {
     static const char magic[16] = {'S','Q','L','i','t','e',' ','f',
                                    'o','r','m','a','t',' ','3','\0'};
 
     std::ifstream f(image_path, std::ios::binary);
     if (!f) throw ParseError("cannot open image: " + image_path);
+    f.seekg(static_cast<std::streamoff>(start));
 
     constexpr size_t CHUNK   = 4 * 1024 * 1024;   // 4 MB
     constexpr size_t OVERLAP = 128;               // enough to catch a split header
 
     std::vector<uint8_t> buf(CHUNK + OVERLAP);
-    std::vector<std::string> out;
+    std::vector<Hit> hits;
 
-    uint64_t buf0_file_pos = 0;
+    uint64_t buf0_file_pos = start;
     size_t   carry         = 0;
-    int      idx           = 0;
 
-    while (true) {
+    while (buf0_file_pos < end) {
         f.read(reinterpret_cast<char*>(buf.data() + carry), CHUNK);
         size_t got   = static_cast<size_t>(f.gcount());
         size_t avail = carry + got;
@@ -70,9 +83,10 @@ std::vector<std::string> carve_by_signature(const std::string& image_path,
         if (avail == 0) break;
 
         for (size_t i = 0; i + 100 <= avail; ) {
-            if (std::memcmp(buf.data() + i, magic, 16) != 0) { ++i; continue; }
-
             uint64_t hit_pos = buf0_file_pos + i;
+            if (hit_pos >= end) break; // rest belongs to the next range
+
+            if (std::memcmp(buf.data() + i, magic, 16) != 0) { ++i; continue; }
 
             // Real SQLite dbs start on at least a 512-byte boundary in
             // a filesystem. Unaligned hits are embedded strings.
@@ -87,32 +101,26 @@ std::vector<std::string> carve_by_signature(const std::string& image_path,
                                   (uint32_t(h[30]) << 8)  |  uint32_t(h[31]);
             uint64_t span = uint64_t(page_count) * ps;
 
-            // Clamp insane or zero spans
+            // Clamp insane or zero spans. This is a low-confidence guess
+            // ("grab up to this much just in case"), not a real size -
+            // the dedup pass below must not treat it as authoritative
+            // coverage, or one corrupt header can blank out every real
+            // database that happens to physically follow it.
             const uint64_t kCeil = 256ull * 1024 * 1024;
-            if (span == 0 || span > kCeil) span = kCeil;
+            bool clamped = (span == 0 || span > kCeil);
+            if (clamped) span = kCeil;
 
-            std::string path = (fs::path(out_dir) /
-                ("carved_" + std::to_string(idx++) + ".db")).string();
-            {
-                std::ifstream src(image_path, std::ios::binary);
-                src.seekg(static_cast<std::streamoff>(hit_pos));
-                std::vector<uint8_t> db_buf(static_cast<size_t>(span));
-                src.read(reinterpret_cast<char*>(db_buf.data()),
-                         static_cast<std::streamsize>(span));
-                size_t actual = static_cast<size_t>(src.gcount());
-                db_buf.resize(actual);
-                std::ofstream o(path, std::ios::binary);
-                o.write(reinterpret_cast<const char*>(db_buf.data()),
-                        static_cast<std::streamsize>(actual));
-                if (verbose)
-                    std::cerr << "[*] carved " << path
-                              << " at offset " << hit_pos
-                              << " (" << actual << " bytes)\n";
-            }
-            out.push_back(path);
+            hits.push_back({hit_pos, ps, span, clamped});
 
-            size_t skip = static_cast<size_t>(std::min(span, uint64_t(avail - i)));
-            i += (skip > 0 ? skip : 1);
+            // A real hit can't recur before the next 512-byte-aligned
+            // slot; jump straight there rather than rescanning byte by
+            // byte. Deliberately *not* skipping past the whole `span`
+            // here (an earlier version did, within the current buffer)
+            // - that made results depend on exactly where buffer/chunk
+            // boundaries happened to fall, which shifts under different
+            // worker counts. Overlapping candidates are resolved
+            // deterministically afterward in carve_by_signature instead.
+            i += 512;
         }
 
         if (got == 0) break;  // EOF, done
@@ -124,10 +132,144 @@ std::vector<std::string> carve_by_signature(const std::string& image_path,
             carry = OVERLAP;
         } else {
             // Less than OVERLAP total, carry the whole thing
-            buf0_file_pos += 0;
             carry = avail;
         }
     }
+
+    return hits;
+}
+
+/// @brief Streaming signature carver. Splits the image into byte ranges
+/// scanned concurrently, then extracts each candidate's bytes concurrently
+/// too (the actual expensive part - up to 256MB of read+write per hit).
+///
+/// Splitting the scan across threads is safe here because each range's
+/// ownership is exclusive (a hit only belongs to the range that contains
+/// its start offset) and independent (each thread gets its own stream).
+/// The candidate list is sorted and deduplicated by offset after the
+/// parallel scan (see the position-based dedup pass below), which makes
+/// the result deterministic - the same set of candidates regardless of
+/// worker count - and gives ascending-offset `carved_N.db` numbering,
+/// even though the actual discovery order
+/// across threads isn't otherwise deterministic.
+///
+/// @param image_path Path to the raw image.
+/// @param out_dir Output directory for carved .db files.
+/// @param verbose If true, log each carve to stderr.
+/// @param workers Worker threads for the scan and extract phases.
+/// @return Paths of the carved .db files, in ascending offset order.
+/// @throws ParseError if the image can't be opened or sized.
+std::vector<std::string> carve_by_signature(const std::string& image_path,
+                                             const std::string& out_dir,
+                                             bool verbose,
+                                             unsigned workers) {
+    uint64_t image_size;
+    try {
+        image_size = static_cast<uint64_t>(fs::file_size(image_path));
+    } catch (const std::exception&) {
+        throw ParseError("cannot stat image: " + image_path);
+    }
+    if (image_size == 0) return {};
+
+    // Keep ranges at least one CHUNK so the scan isn't dominated by
+    // per-thread startup overhead on a small image.
+    constexpr uint64_t kMinRange = 4ull * 1024 * 1024;
+    uint64_t max_ranges = std::max<uint64_t>(1, image_size / kMinRange);
+    unsigned worker_count = static_cast<unsigned>(
+        std::min<uint64_t>(std::max(1u, workers), max_ranges));
+
+    uint64_t range_size = (image_size + worker_count - 1) / worker_count;
+
+    // Phase 1: parallel scan. Each worker collects into its own vector so
+    // no locking is needed while threads are running.
+    std::vector<std::vector<Hit>> per_thread(worker_count);
+    {
+        std::vector<std::thread> pool;
+        pool.reserve(worker_count);
+        for (unsigned w = 0; w < worker_count; ++w) {
+            uint64_t start = w * range_size;
+            uint64_t end   = std::min(image_size, start + range_size);
+            if (start >= end) continue;
+            pool.emplace_back([&, start, end, w]() {
+                per_thread[w] = scan_range(image_path, start, end);
+            });
+        }
+        for (auto& t : pool) t.join();
+    }
+
+    // Phase 2: cheap sequential merge, sort, and dedup. Concatenation
+    // order across threads is already ascending (thread w owns a lower
+    // range than thread w+1), so the sort is mostly a formality/safety
+    // net. The dedup pass, though, matters: a hit whose offset falls
+    // inside an already-accepted candidate's span is almost always the
+    // same data reappearing (e.g. an embedded/nested structure inside a
+    // large carved db), not a second distinct database. Doing this as an
+    // explicit position-based pass over the sorted list - rather than
+    // relying on scan buffer boundaries to "happen" to skip past it -
+    // keeps the result identical no matter how many threads did the
+    // scanning or how the image got divided among them.
+    std::vector<Hit> hits;
+    for (auto& v : per_thread) hits.insert(hits.end(), v.begin(), v.end());
+    std::sort(hits.begin(), hits.end(),
+             [](const Hit& a, const Hit& b) { return a.pos < b.pos; });
+
+    std::vector<Hit> deduped;
+    deduped.reserve(hits.size());
+    uint64_t covered_until = 0;
+    for (const auto& h : hits) {
+        if (h.pos < covered_until) continue;
+        deduped.push_back(h);
+        // Only a genuine (non-clamped) span is trustworthy enough to
+        // claim coverage over what follows it; a fallback-clamped guess
+        // only claims its own header position.
+        covered_until = h.clamped ? h.pos + 512 : h.pos + h.span;
+    }
+    hits = std::move(deduped);
+
+    // Phase 3: parallel extraction - the expensive I/O part. Each worker
+    // claims the next sorted hit and pulls it out on its own stream.
+    std::vector<std::string> out(hits.size());
+    if (hits.empty()) return out;
+
+    std::atomic<size_t> next_index{0};
+    std::mutex log_mutex;
+    unsigned extract_workers = static_cast<unsigned>(
+        std::min<size_t>(worker_count, hits.size()));
+
+    auto extractor = [&]() {
+        for (;;) {
+            size_t i = next_index.fetch_add(1);
+            if (i >= hits.size()) return;
+            const Hit& h = hits[i];
+
+            std::string path = (fs::path(out_dir) /
+                ("carved_" + std::to_string(i) + ".db")).string();
+
+            std::ifstream src(image_path, std::ios::binary);
+            src.seekg(static_cast<std::streamoff>(h.pos));
+            std::vector<uint8_t> db_buf(static_cast<size_t>(h.span));
+            src.read(reinterpret_cast<char*>(db_buf.data()),
+                     static_cast<std::streamsize>(h.span));
+            size_t actual = static_cast<size_t>(src.gcount());
+            db_buf.resize(actual);
+            std::ofstream o(path, std::ios::binary);
+            o.write(reinterpret_cast<const char*>(db_buf.data()),
+                    static_cast<std::streamsize>(actual));
+
+            if (verbose) {
+                std::lock_guard<std::mutex> lk(log_mutex);
+                std::cerr << "[*] carved " << path
+                          << " at offset " << h.pos
+                          << " (" << actual << " bytes)\n";
+            }
+            out[i] = std::move(path);
+        }
+    };
+
+    std::vector<std::thread> pool;
+    pool.reserve(extract_workers);
+    for (unsigned w = 0; w < extract_workers; ++w) pool.emplace_back(extractor);
+    for (auto& t : pool) t.join();
 
     return out;
 }
@@ -149,7 +291,8 @@ std::vector<std::string> carve_with_tsk(const std::string& image_path,
 
 std::vector<std::string> carve_databases(const std::string& image_path,
                                          const std::string& out_dir,
-                                         bool verbose) {
+                                         bool verbose,
+                                         unsigned workers) {
     fs::create_directories(out_dir);
 #ifdef SQLRECOVER_USE_TSK
     try {
@@ -163,7 +306,7 @@ std::vector<std::string> carve_databases(const std::string& image_path,
                       << "); falling back to signature carving\n";
     }
 #endif
-    return carve_by_signature(image_path, out_dir, verbose);
+    return carve_by_signature(image_path, out_dir, verbose, workers);
 }
 
 } // namespace sqlrecover

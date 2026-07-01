@@ -50,6 +50,33 @@ const std::vector<Artifact>& artifact_catalog() {
                 {"number",       ColClass::TextLike},
             },
         },
+        {
+            "android_sms_gms",
+            "Android SMS via Google Mobile Services (Message table, 21 cols)",
+            {
+                    {"_id",            ColClass::Any},
+                    {"action",         ColClass::TextLike},   // "add" / "del"
+                    {"uri",            ColClass::TextLike},   // content://sms/<id>
+                    {"unknown1",       ColClass::Any},
+                    {"date",           ColClass::IntLike, Interp::EpochSeconds},
+                    {"date_inserted",  ColClass::IntLike, Interp::EpochMillis},
+                    {"payload",        ColClass::Any},         // protobuf blob
+                    {"unknown2",       ColClass::Any},
+                    {"unknown3",       ColClass::Any},
+                    {"body",           ColClass::TextLike},
+                    {"unknown4",       ColClass::Any},
+                    {"unknown5",       ColClass::Any},
+                    {"unknown6",       ColClass::Any},
+                    {"unknown7",       ColClass::Any},
+                    {"unknown8",       ColClass::Any},
+                    {"sender_addr",    ColClass::IntLike},     // E.164 as int? weird
+                    {"recipient_addr", ColClass::IntLike},
+                    {"thread_id",      ColClass::IntLike},
+                    {"date_received",  ColClass::IntLike, Interp::EpochMillis},
+                    {"unknown9",       ColClass::Any},
+                    {"label",          ColClass::TextLike},    // "read" / "unread"
+                },
+            },
     };
     return catalog;
 }
@@ -143,6 +170,10 @@ ArtifactTimeline artifact_timeline(const std::string& artifact_name) {
     if (artifact_name == "android_calllog") {
         // date(2); summary from type(4), number(1), duration(3), name(5)
         return {true, 2, Interp::EpochMillis, {4, 1, 3, 5}};
+    }
+    if (artifact_name == "android_sms_gms") {
+        // date(4); summary from label(20), sender/recipient(15/16), body(9)
+        return {true, 4, Interp::EpochSeconds, {20, 15, 16, 9}};
     }
     // contacts have no event timestamp, not on the timeline
     return {};

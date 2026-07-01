@@ -149,20 +149,35 @@ json record_to_json(const Record& r) {
 
 
 void write_json(std::ostream& os, const std::vector<Record>& records) {
-    json arr = json::array();
-    for (const auto& r : records) arr.push_back(record_to_json(r));
-    // error_handler_t::replace so we never throw on stray invalid bytes
-    // that snuck past the value-level handling
-    os << arr.dump(2, ' ', false, json::error_handler_t::replace) << "\n";
+    // Stream each record's own dump directly rather than collecting a
+    // single giant nlohmann::json array first: for multi-million-record
+    // recoveries the array-of-everything approach means millions of
+    // allocations sitting in memory at once and one huge dump() pass at
+    // the end. Streaming keeps memory flat and writes as we go, at the
+    // cost of hand-indenting each record to nest inside the array.
+    if (records.empty()) { os << "[]\n"; return; }
+    os << "[\n";
+    for (size_t i = 0; i < records.size(); ++i) {
+        // error_handler_t::replace so we never throw on stray invalid
+        // bytes that snuck past the value-level handling
+        std::string dumped = record_to_json(records[i])
+            .dump(2, ' ', false, json::error_handler_t::replace);
+        os << "  ";
+        for (char c : dumped) {
+            os << c;
+            if (c == '\n') os << "  ";
+        }
+        os << (i + 1 < records.size() ? ",\n" : "\n");
+    }
+    os << "]\n";
 }
 
-///@brief One compact object per line. indent =-1 kees each record
-/// on a single line so tools like grep can stream it. Might be useful
-/// probably not.
+/// @brief One compact object per line (NDJSON) so tools like grep can
+/// stream it a record at a time.
 void write_jsonl(std::ostream& os, const std::vector<Record>& records) {
     for (const auto& r : records) {
         json jr = record_to_json(r);
-        os << jr.dump(2, ' ', false, json::error_handler_t::replace) << std::endl;
+        os << jr.dump(-1, ' ', false, json::error_handler_t::replace) << '\n';
     }
 }
 

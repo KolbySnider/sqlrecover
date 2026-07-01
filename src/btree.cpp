@@ -80,12 +80,21 @@ void walk_page(const Database& db, uint32_t page_no,
 
     if (ph.kind == PageKind::InteriorTable) {
         size_t hdr_base = (page_no == 1 ? 100 : 0) + ph.header_size;
+        // A corrupt/coincidental page can claim a num_cells that doesn't
+        // fit its own pointer array; bail before we read off the page.
+        if (hdr_base + size_t(ph.num_cells) * 2 > db.page_size()) return;
         ByteReader cells(page, db.page_size(), hdr_base);
         for (uint16_t i = 0; i < ph.num_cells; ++i) {
-            uint16_t cell_ptr = cells.u16();
-            ByteReader c(page, db.page_size(), cell_ptr);
-            uint32_t child = c.u32();
-            walk_page(db, child, table_label, visited, sink, depth + 1);
+            try {
+                uint16_t cell_ptr = cells.u16();
+                ByteReader c(page, db.page_size(), cell_ptr);
+                uint32_t child = c.u32();
+                walk_page(db, child, table_label, visited, sink, depth + 1);
+            } catch (...) {
+                // One corrupt cell pointer/child doesn't invalidate the
+                // rest of this page's siblings.
+                continue;
+            }
         }
         walk_page(db, ph.right_pointer, table_label, visited, sink, depth + 1);
         return;
@@ -118,44 +127,56 @@ void decode_leaf_page(const Database& db, uint32_t page_no, Origin origin,
 
     uint32_t usable = db.usable_size();
     size_t hdr_base = (page_no == 1 ? 100 : 0) + ph.header_size;
+    // A corrupt/coincidental page (very common when scanning every page
+    // in an image, not just ones reachable from a trusted schema root)
+    // can claim a num_cells that doesn't fit its own pointer array; bail
+    // before we read off the page.
+    if (hdr_base + size_t(ph.num_cells) * 2 > db.page_size()) return;
     ByteReader cells(page, db.page_size(), hdr_base);
 
     for (uint16_t i = 0; i < ph.num_cells; ++i) {
         uint16_t cell_ptr = cells.u16();
         if (cell_ptr >= db.page_size()) continue;
-        ByteReader c(page, db.page_size(), cell_ptr);
 
-        Varint plen = read_varint(c);   // total payload bytes
-        Varint rowid = read_varint(c);
-        size_t payload_start = c.pos();
+        try {
+            ByteReader c(page, db.page_size(), cell_ptr);
 
-        uint32_t local = local_payload_len(plen.value, usable);
-        if (payload_start + local > db.page_size()) continue;
+            Varint plen = read_varint(c);   // total payload bytes
+            Varint rowid = read_varint(c);
+            size_t payload_start = c.pos();
 
-        const uint8_t* lp = page + payload_start;
-        std::vector<uint8_t> payload;
-        uint32_t first_overflow = 0;
-        if (local < plen.value) {
-            ByteReader oc(page, db.page_size(), payload_start + local);
-            first_overflow = oc.u32();
-            payload = assemble_payload(db, lp, local, plen.value, first_overflow);
-        } else {
-            payload.assign(lp, lp + local);
-        }
+            uint32_t local = local_payload_len(plen.value, usable);
+            if (payload_start + local > db.page_size()) continue;
 
-        std::vector<Value> vals;
-        if (!decode_record(payload.data(), payload.size(),
-                           db.header().encoding, vals))
+            const uint8_t* lp = page + payload_start;
+            std::vector<uint8_t> payload;
+            uint32_t first_overflow = 0;
+            if (local < plen.value) {
+                ByteReader oc(page, db.page_size(), payload_start + local);
+                first_overflow = oc.u32();
+                payload = assemble_payload(db, lp, local, plen.value, first_overflow);
+            } else {
+                payload.assign(lp, lp + local);
+            }
+
+            std::vector<Value> vals;
+            if (!decode_record(payload.data(), payload.size(),
+                               db.header().encoding, vals))
+                continue;
+
+            Record rec;
+            rec.rowid = static_cast<int64_t>(rowid.value);
+            rec.values = std::move(vals);
+            rec.prov.source_file = db.path();
+            rec.prov.origin = origin;
+            rec.prov.page_no = page_no;
+            rec.prov.byte_offset = page_offset(page_no, db.page_size()) + cell_ptr;
+            sink(std::move(rec));
+        } catch (...) {
+            // Cell's length-prefixed varint ran off the end of the page.
+            // One corrupt cell doesn't invalidate the rest of the page.
             continue;
-
-        Record rec;
-        rec.rowid = static_cast<int64_t>(rowid.value);
-        rec.values = std::move(vals);
-        rec.prov.source_file = db.path();
-        rec.prov.origin = origin;
-        rec.prov.page_no = page_no;
-        rec.prov.byte_offset = page_offset(page_no, db.page_size()) + cell_ptr;
-        sink(std::move(rec));
+        }
     }
 }
 

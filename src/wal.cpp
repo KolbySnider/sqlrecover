@@ -33,6 +33,9 @@ void decode_frame_page(const uint8_t* page, uint32_t page_size, uint32_t usable,
     if (!ph.valid || ph.kind != PageKind::LeafTable) return;
 
     size_t hdr_base = (db_page_no == 1 ? 100 : 0) + ph.header_size;
+    // Same guard as decode_leaf_page: don't trust num_cells to fit its
+    // own pointer array on a page image that might be stale/corrupt.
+    if (hdr_base + size_t(ph.num_cells) * 2 > page_size) return;
     ByteReader cells(page, page_size, hdr_base);
     for (uint16_t i = 0; i < ph.num_cells; ++i) {
         uint16_t cell_ptr = cells.u16();

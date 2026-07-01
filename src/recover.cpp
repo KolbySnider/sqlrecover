@@ -213,13 +213,22 @@ std::set<uint32_t> collect_freelist(const Database& db) {
         if (!seen_trunks.insert(trunk).second) break;
         const uint8_t* p;
         try { p = db.page(trunk); } catch (...) { break; }
-        ByteReader r(p, db.page_size());
-        uint32_t next = r.u32();
-        uint32_t n = r.u32();
-        if (n > (db.page_size() / 4)) break; // corrupt count, bail
-        for (uint32_t i = 0; i < n; ++i) {
-            uint32_t leaf = r.u32();
-            if (leaf != 0) pages.insert(leaf);
+        // 8-byte trunk header (next-trunk, count) precedes the leaf list;
+        // only (page_size - 8) / 4 entries actually fit after it.
+        if (db.page_size() < 8) break;
+        uint32_t max_leaves = (db.page_size() - 8) / 4;
+        uint32_t next, n;
+        try {
+            ByteReader r(p, db.page_size());
+            next = r.u32();
+            n = r.u32();
+            if (n > max_leaves) break; // corrupt count, bail
+            for (uint32_t i = 0; i < n; ++i) {
+                uint32_t leaf = r.u32();
+                if (leaf != 0) pages.insert(leaf);
+            }
+        } catch (...) {
+            break; // trunk is corrupt; keep whatever we already collected
         }
         pages.insert(trunk); // trunk page contents are themselves residual
         trunk = next;

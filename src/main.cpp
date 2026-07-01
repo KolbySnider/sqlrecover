@@ -220,7 +220,7 @@ int main(int argc, char** argv) {
 
             // 3. Slack-space recovery
             before = residual.size();
-            recover_slack(db, [&](Record&& r){ residual.push_back(std::move(r)); });
+            recover_slack(db, visited, [&](Record&& r){ residual.push_back(std::move(r)); });
             size_t slack_n = residual.size() - before;
             log("slack records: " + std::to_string(slack_n));
 

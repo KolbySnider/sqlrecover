@@ -33,11 +33,19 @@ void recover_freelist(const Database& db,
                       const std::vector<bool>& visited_live,
                       const std::function<void(Record&&)>& sink);
 
-/// @brief Scan slack and freeblock space on every leaf page.
+/// @brief Scan slack and freeblock space on every leaf page. Pages that
+/// are structurally valid leaf tables but weren't touched by the live
+/// walk (orphaned - no schema root points at them, which is the common
+/// case when sqlite_master itself didn't survive) get their real cells
+/// decoded directly, the same way sqlite3's own `.recover` command
+/// treats every intact leaf page as a potential source of rows.
 /// @param db Source database.
+/// @param visited Pages already touched by the live walk. Sized to
+///                page_count()+2, as produced by walk_table_btree.
 /// @param sink Callback invoked once per decoded row. Records get
 ///             origin = Slack.
 void recover_slack(const Database& db,
+                   const std::vector<bool>& visited,
                    const std::function<void(Record&&)>& sink);
 
 } // namespace sqlrecover

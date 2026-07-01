@@ -78,11 +78,9 @@ void walk_page(const Database& db, uint32_t page_no,
     PageHeader ph = parse_page_header(page, db.page_size(), page_no);
     if (!ph.valid) return;
 
-    uint32_t usable = db.usable_size();
-    size_t hdr_base = (page_no == 1 ? 100 : 0) + ph.header_size;
-    ByteReader cells(page, db.page_size(), hdr_base);
-
     if (ph.kind == PageKind::InteriorTable) {
+        size_t hdr_base = (page_no == 1 ? 100 : 0) + ph.header_size;
+        ByteReader cells(page, db.page_size(), hdr_base);
         for (uint16_t i = 0; i < ph.num_cells; ++i) {
             uint16_t cell_ptr = cells.u16();
             ByteReader c(page, db.page_size(), cell_ptr);
@@ -94,6 +92,33 @@ void walk_page(const Database& db, uint32_t page_no,
     }
 
     if (ph.kind != PageKind::LeafTable) return; // index pages, skip for now
+
+    decode_leaf_page(db, page_no, Origin::Live, [&](Record&& rec) {
+        rec.table = table_label;
+        sink(std::move(rec));
+    });
+}
+
+} // namespace
+
+void walk_table_btree(const Database& db, uint32_t root_page,
+                      const std::string& table_label,
+                      std::vector<bool>& visited,
+                      const std::function<void(Record&&)>& sink) {
+    walk_page(db, root_page, table_label, visited, sink, 0);
+}
+
+void decode_leaf_page(const Database& db, uint32_t page_no, Origin origin,
+                      const std::function<void(Record&&)>& sink) {
+    const uint8_t* page;
+    try { page = db.page(page_no); } catch (...) { return; }
+
+    PageHeader ph = parse_page_header(page, db.page_size(), page_no);
+    if (!ph.valid || ph.kind != PageKind::LeafTable) return;
+
+    uint32_t usable = db.usable_size();
+    size_t hdr_base = (page_no == 1 ? 100 : 0) + ph.header_size;
+    ByteReader cells(page, db.page_size(), hdr_base);
 
     for (uint16_t i = 0; i < ph.num_cells; ++i) {
         uint16_t cell_ptr = cells.u16();
@@ -126,22 +151,12 @@ void walk_page(const Database& db, uint32_t page_no,
         Record rec;
         rec.rowid = static_cast<int64_t>(rowid.value);
         rec.values = std::move(vals);
-        rec.table = table_label;
         rec.prov.source_file = db.path();
-        rec.prov.origin = Origin::Live;
+        rec.prov.origin = origin;
         rec.prov.page_no = page_no;
         rec.prov.byte_offset = page_offset(page_no, db.page_size()) + cell_ptr;
         sink(std::move(rec));
     }
-}
-
-} // namespace
-
-void walk_table_btree(const Database& db, uint32_t root_page,
-                      const std::string& table_label,
-                      std::vector<bool>& visited,
-                      const std::function<void(Record&&)>& sink) {
-    walk_page(db, root_page, table_label, visited, sink, 0);
 }
 
 } // namespace sqlrecover

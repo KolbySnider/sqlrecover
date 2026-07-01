@@ -26,4 +26,18 @@ void walk_table_btree(const Database& db, uint32_t root_page,
                       std::vector<bool>& visited,
                       const std::function<void(Record&&)>& sink);
 
+/// @brief Decode every cell on a single leaf table page directly from its
+/// cell-pointer array, following overflow chains as needed. Unlike
+/// walk_table_btree this doesn't require the page to be reachable from a
+/// root; it's meant for pages that are structurally intact but orphaned
+/// (no live schema points at them), which sqlite3's own `.recover` command
+/// picks up but a pure root-down walk would miss.
+/// @param db Source database.
+/// @param page_no 1-based page to decode. No-op if it isn't a valid leaf
+///                table page.
+/// @param origin Origin tag to stamp on emitted records.
+/// @param sink Callback invoked once per decoded row.
+void decode_leaf_page(const Database& db, uint32_t page_no, Origin origin,
+                      const std::function<void(Record&&)>& sink);
+
 } // namespace sqlrecover

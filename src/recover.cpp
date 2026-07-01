@@ -1,5 +1,6 @@
 #include "recover.hpp"
 #include "database.hpp"
+#include "btree.hpp"
 #include "page.hpp"
 #include "varint.hpp"
 #include "serial.hpp"
@@ -244,6 +245,7 @@ void recover_freelist(const Database& db,
 }
 
 void recover_slack(const Database& db,
+                   const std::vector<bool>& visited,
                    const std::function<void(Record&&)>& sink) {
     uint32_t pages = db.page_count();
     uint32_t psize = db.page_size();
@@ -253,6 +255,15 @@ void recover_slack(const Database& db,
         PageHeader ph = parse_page_header(page, psize, pg);
 
         if (ph.valid && ph.kind == PageKind::LeafTable) {
+            // A structurally intact leaf page that the live walk never
+            // reached is an orphan: no root in a surviving schema points
+            // at it (schema recovery can fail entirely on a carved
+            // fragment), but its cells are still real, undamaged rows.
+            // Decode them directly instead of leaving them to the
+            // narrower slack/freeblock scan below.
+            if (pg >= visited.size() || !visited[pg])
+                decode_leaf_page(db, pg, Origin::Slack, sink);
+
             // Structured scan: trust the page header to point us at the
             // slack gap and freeblock chain.
             uint32_t ccs = ph.cell_content_start == 0 ? 65536 : ph.cell_content_start;

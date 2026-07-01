@@ -2,6 +2,8 @@
 #include "../third_party/json.hpp"
 #include <iomanip>
 #include <sstream>
+#include <thread>
+#include <functional>
 
 using nlohmann::json;
 
@@ -105,6 +107,44 @@ std::string csv_escape(const std::string& s) {
     return out;
 }
 
+/// @brief Format `records` in parallel by splitting into `workers` chunks,
+/// each rendered by `format_one` into its own buffer, then write all
+/// buffers to `os` in original order. Only the CPU-bound per-record
+/// formatting (UTF-8 validation, escaping, hex-encoding) runs
+/// concurrently; the write to `os` stays sequential, so output order and
+/// content are identical to a single-threaded pass regardless of worker
+/// count.
+/// @param os Stream to write to.
+/// @param records Records to format.
+/// @param workers Worker threads to use. At least 1.
+/// @param format_one Appends one record's rendering (given its global
+///                   index, for formats that need to know the last
+///                   record) to a buffer.
+void write_parallel(std::ostream& os, const std::vector<Record>& records,
+                    unsigned workers,
+                    const std::function<void(const Record&, size_t, std::string&)>& format_one) {
+    if (records.empty()) return;
+    unsigned worker_count = static_cast<unsigned>(
+        std::min<size_t>(std::max(1u, workers), records.size()));
+    size_t per_chunk = (records.size() + worker_count - 1) / worker_count;
+
+    std::vector<std::string> chunks(worker_count);
+    std::vector<std::thread> pool;
+    pool.reserve(worker_count);
+    for (unsigned w = 0; w < worker_count; ++w) {
+        size_t begin = w * per_chunk;
+        size_t end = std::min(records.size(), begin + per_chunk);
+        if (begin >= end) continue;
+        pool.emplace_back([&, begin, end, w]() {
+            std::string& buf = chunks[w];
+            for (size_t i = begin; i < end; ++i) format_one(records[i], i, buf);
+        });
+    }
+    for (auto& t : pool) t.join();
+
+    for (const auto& c : chunks) os << c;
+}
+
 } // namespace
 
 /// @brief Build a JSON node for one record. Shared between write_json
@@ -148,66 +188,76 @@ json record_to_json(const Record& r) {
 }
 
 
-void write_json(std::ostream& os, const std::vector<Record>& records) {
-    // Stream each record's own dump directly rather than collecting a
+void write_json(std::ostream& os, const std::vector<Record>& records, unsigned workers) {
+    // Format each record's own dump directly rather than collecting a
     // single giant nlohmann::json array first: for multi-million-record
     // recoveries the array-of-everything approach means millions of
     // allocations sitting in memory at once and one huge dump() pass at
-    // the end. Streaming keeps memory flat and writes as we go, at the
-    // cost of hand-indenting each record to nest inside the array.
+    // the end. Per-record formatting (the expensive part - UTF-8
+    // validation, blob hex-encoding, JSON escaping) is parallelized
+    // across `workers` threads via write_parallel; only the final write
+    // to `os` is sequential.
     if (records.empty()) { os << "[]\n"; return; }
     os << "[\n";
-    for (size_t i = 0; i < records.size(); ++i) {
-        // error_handler_t::replace so we never throw on stray invalid
-        // bytes that snuck past the value-level handling
-        std::string dumped = record_to_json(records[i])
-            .dump(2, ' ', false, json::error_handler_t::replace);
-        os << "  ";
-        for (char c : dumped) {
-            os << c;
-            if (c == '\n') os << "  ";
-        }
-        os << (i + 1 < records.size() ? ",\n" : "\n");
-    }
+    size_t total = records.size();
+    write_parallel(os, records, workers,
+        [total](const Record& r, size_t i, std::string& buf) {
+            // error_handler_t::replace so we never throw on stray invalid
+            // bytes that snuck past the value-level handling
+            std::string dumped = record_to_json(r)
+                .dump(2, ' ', false, json::error_handler_t::replace);
+            buf += "  ";
+            for (char c : dumped) {
+                buf += c;
+                if (c == '\n') buf += "  ";
+            }
+            buf += (i + 1 < total ? ",\n" : "\n");
+        });
     os << "]\n";
 }
 
 /// @brief One compact object per line (NDJSON) so tools like grep can
-/// stream it a record at a time.
-void write_jsonl(std::ostream& os, const std::vector<Record>& records) {
-    for (const auto& r : records) {
-        json jr = record_to_json(r);
-        os << jr.dump(-1, ' ', false, json::error_handler_t::replace) << '\n';
-    }
+/// stream it a record at a time. Per-record formatting is parallelized
+/// the same way as write_json.
+void write_jsonl(std::ostream& os, const std::vector<Record>& records, unsigned workers) {
+    write_parallel(os, records, workers,
+        [](const Record& r, size_t /*i*/, std::string& buf) {
+            buf += record_to_json(r)
+                .dump(-1, ' ', false, json::error_handler_t::replace);
+            buf += '\n';
+        });
 }
 
-void write_csv(std::ostream& os, const std::vector<Record>& records) {
+void write_csv(std::ostream& os, const std::vector<Record>& records, unsigned workers) {
     os << "table,artifact,origin,page_no,byte_offset,wal_frame,rowid,suspect,values,decoded\n";
-    for (const auto& r : records) {
-        os << csv_escape(r.table) << ','
-           << csv_escape(r.artifact) << ','
-           << to_string(r.prov.origin) << ','
-           << r.prov.page_no << ','
-           << r.prov.byte_offset << ','
-           << (r.prov.wal_frame ? std::to_string(*r.prov.wal_frame) : "") << ','
-           << (r.rowid ? std::to_string(*r.rowid) : "") << ','
-           << (r.suspect ? "1" : "0") << ',';
-        bool named = !r.column_names.empty() &&
-                     r.column_names.size() == r.values.size();
-        std::string joined;
-        for (size_t i = 0; i < r.values.size(); ++i) {
-            if (i) joined += " | ";
-            if (named) joined += r.column_names[i] + "=";
-            joined += value_to_cell(r.values[i]);
-        }
-        os << csv_escape(joined) << ',';
-        std::string dec;
-        for (size_t i = 0; i < r.decoded.size(); ++i) {
-            if (i) dec += " | ";
-            dec += r.decoded[i].first + "=" + r.decoded[i].second;
-        }
-        os << csv_escape(dec) << '\n';
-    }
+    write_parallel(os, records, workers,
+        [](const Record& r, size_t /*i*/, std::string& buf) {
+            buf += csv_escape(r.table); buf += ',';
+            buf += csv_escape(r.artifact); buf += ',';
+            buf += to_string(r.prov.origin); buf += ',';
+            buf += std::to_string(r.prov.page_no); buf += ',';
+            buf += std::to_string(r.prov.byte_offset); buf += ',';
+            buf += (r.prov.wal_frame ? std::to_string(*r.prov.wal_frame) : ""); buf += ',';
+            buf += (r.rowid ? std::to_string(*r.rowid) : ""); buf += ',';
+            buf += (r.suspect ? "1" : "0"); buf += ',';
+
+            bool named = !r.column_names.empty() &&
+                         r.column_names.size() == r.values.size();
+            std::string joined;
+            for (size_t i = 0; i < r.values.size(); ++i) {
+                if (i) joined += " | ";
+                if (named) joined += r.column_names[i] + "=";
+                joined += value_to_cell(r.values[i]);
+            }
+            buf += csv_escape(joined); buf += ',';
+
+            std::string dec;
+            for (size_t i = 0; i < r.decoded.size(); ++i) {
+                if (i) dec += " | ";
+                dec += r.decoded[i].first + "=" + r.decoded[i].second;
+            }
+            buf += csv_escape(dec); buf += '\n';
+        });
 }
 
 void write_report(std::ostream& os, const RunSummary& s) {

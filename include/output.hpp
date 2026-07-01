@@ -25,17 +25,28 @@ struct RunSummary {
     size_t      failed = 0;    ///< candidate dbs that errored out and were skipped
 };
 
-/// @brief Write records as JSON.
+/// @brief Write records as JSON. Per-record formatting (UTF-8 validation,
+/// blob hex-encoding, JSON escaping) is parallelized across `workers`
+/// threads; the actual write to `os` stays sequential and in original
+/// record order.
 /// @param[out] os Stream to write to.
 /// @param records Records to dump.
-void write_json(std::ostream& os, const std::vector<Record>& records);
+/// @param workers Worker threads for formatting. At least 1.
+void write_json(std::ostream& os, const std::vector<Record>& records,
+                unsigned workers = 1);
 
-void write_jsonl(std::ostream& os, const std::vector<Record>& records);
+/// @brief Same parallel-formatting approach as write_json, one compact
+/// object per line (NDJSON).
+void write_jsonl(std::ostream& os, const std::vector<Record>& records,
+                 unsigned workers = 1);
 
-/// @brief Write records as CSV.
+/// @brief Write records as CSV. Same parallel-formatting approach as
+/// write_json.
 /// @param[out] os Stream to write to.
 /// @param records Records to dump.
-void write_csv(std::ostream& os, const std::vector<Record>& records);
+/// @param workers Worker threads for formatting. At least 1.
+void write_csv(std::ostream& os, const std::vector<Record>& records,
+              unsigned workers = 1);
 
 /// @brief Write a human-readable summary report.
 /// @param[out] os Stream to write to.

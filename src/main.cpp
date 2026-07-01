@@ -19,6 +19,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <optional>
 
 using namespace sqlrecover;
 namespace fs = std::filesystem;
@@ -167,13 +168,17 @@ void label_records(std::vector<Record>& recs, const std::vector<TableDef>& table
     }
 }
 
-/// @brief Everything one worker produces for one candidate db. Kept
-/// separate per-db so workers never touch shared state while running;
-/// a single-threaded pass afterward merges these in original db_paths
-/// order
+/// @brief One db's state across both phases: opened in phase 1 (schema,
+/// live walk, freelist, WAL), then its pages get split into chunks and
+/// scanned for slack in phase 2 alongside every other db's chunks. `db`,
+/// `tables`, `visited` are read-only by the time phase 2 starts, so
+/// concurrent chunk workers can safely share them.
 struct DbOutcome {
+    std::optional<Database> db;
+    std::vector<TableDef> tables;
+    std::vector<bool> visited;
     std::vector<Record> live;
-    std::vector<Record> residual;
+    std::vector<Record> residual; // freelist+wal from phase 1; slack chunks appended after phase 2
     std::string wal_file;
     uint32_t page_size = 0;
     uint32_t page_count = 0;
@@ -182,6 +187,12 @@ struct DbOutcome {
     size_t wal_n = 0;
     bool failed = false;
     std::string error;
+};
+
+/// @brief One page-range chunk of one db's slack scan.
+struct SlackTask {
+    size_t db_index;
+    uint32_t pg_start, pg_end;
 };
 
 } // namespace
@@ -229,34 +240,26 @@ int main(int argc, char** argv) {
         RunSummary sum;
         sum.input_file = args.input;
 
-        // Every candidate db is independent (its own Database instance, no
-        // shared state), so recovery is parallelized across a worker pool.
-        // Each worker writes only to its own claimed slot in `results`
-        // (pre-sized before any thread starts, so no reallocation races);
-        // a single-threaded merge pass afterward walks `results` in
-        // original db_paths order and reproduces exactly what the old
-        // sequential loop did, so output ordering/content is unaffected by
-        // how many workers ran it.
+        // Phase 1: open each db, do schema/live-walk/freelist/WAL. One
+        // worker per db here - cheap relative to slack scanning, and
+        // scales with live row count rather than page count.
         std::vector<DbOutcome> results(db_paths.size());
-        std::atomic<size_t> next_index{0};
+        std::atomic<size_t> next_db{0};
 
         unsigned worker_count = static_cast<unsigned>(
             std::min<size_t>(want_jobs, db_paths.size()));
         if (worker_count == 0) worker_count = 1;
         log("using " + std::to_string(worker_count) + " worker thread(s)");
 
-        auto worker = [&]() {
+        auto phase1 = [&]() {
             for (;;) {
-                size_t i = next_index.fetch_add(1);
+                size_t i = next_db.fetch_add(1);
                 if (i >= db_paths.size()) return;
                 const std::string& db_path = db_paths[i];
                 DbOutcome& res = results[i];
 
-                // One malformed candidate (very common when carving out of
-                // slack/unallocated space) shouldn't cost the results
-                // already recovered from every other database, so
-                // failures here are isolated per-db rather than aborting
-                // the whole run.
+                // One malformed candidate shouldn't cost every other
+                // database's results, so failures are isolated per-db.
                 try {
                     log("opening " + db_path);
                     Database db = Database::open(db_path);
@@ -273,16 +276,16 @@ int main(int argc, char** argv) {
                     log("page size " + std::to_string(db.page_size()) +
                         ", pages " + std::to_string(db.page_count()));
 
-                    std::vector<TableDef> tables = read_schema(db);
-                    log("schema: " + std::to_string(tables.size()) + " tables");
+                    res.tables = read_schema(db);
+                    log("schema: " + std::to_string(res.tables.size()) + " tables");
 
-                    std::vector<bool> visited(db.page_count() + 2, false);
+                    res.visited.assign(db.page_count() + 2, false);
 
-                    // 1. Live records (also marks visited pages). Grab the
-                    // table's column names so live output is fully labelled.
-                    for (const auto& t : tables) {
+                    // Live records also mark visited pages, so slack
+                    // scanning (phase 2) knows which pages are orphans.
+                    for (const auto& t : res.tables) {
                         const std::vector<std::string>& cols = t.columns;
-                        walk_table_btree(db, t.root_page, t.name, visited,
+                        walk_table_btree(db, t.root_page, t.name, res.visited,
                                          [&](Record&& r) {
                                              if (cols.size() == r.values.size())
                                                  r.column_names = cols;
@@ -291,21 +294,12 @@ int main(int argc, char** argv) {
                     }
                     log("live records: " + std::to_string(res.live.size()));
 
-                    // 2. Freelist recovery
                     size_t before = res.residual.size();
-                    recover_freelist(db, visited,
+                    recover_freelist(db, res.visited,
                                      [&](Record&& r){ res.residual.push_back(std::move(r)); });
                     res.freelist_n = res.residual.size() - before;
                     log("freelist records: " + std::to_string(res.freelist_n));
 
-                    // 3. Slack-space recovery
-                    before = res.residual.size();
-                    recover_slack(db, visited,
-                                 [&](Record&& r){ res.residual.push_back(std::move(r)); });
-                    res.slack_n = res.residual.size() - before;
-                    log("slack records: " + std::to_string(res.slack_n));
-
-                    // 4. WAL prior-state recovery
                     before = res.residual.size();
                     if (!wal_path.empty())
                         recover_wal(db, wal_path,
@@ -313,12 +307,10 @@ int main(int argc, char** argv) {
                     res.wal_n = res.residual.size() - before;
                     log("wal records: " + std::to_string(res.wal_n));
 
-                    label_records(res.residual, tables);
-                    label_records(res.live, tables);
-
                     res.wal_file = wal_path;
                     res.page_size = db.page_size();
                     res.page_count = db.page_count();
+                    res.db = std::move(db); // kept alive for phase 2
                 } catch (const std::exception& e) {
                     res.failed = true;
                     res.error = e.what();
@@ -326,14 +318,58 @@ int main(int argc, char** argv) {
             }
         };
 
-        std::vector<std::thread> pool;
-        pool.reserve(worker_count);
-        for (unsigned i = 0; i < worker_count; ++i) pool.emplace_back(worker);
-        for (auto& t : pool) t.join();
+        {
+            std::vector<std::thread> pool;
+            pool.reserve(worker_count);
+            for (unsigned i = 0; i < worker_count; ++i) pool.emplace_back(phase1);
+            for (auto& t : pool) t.join();
+        }
 
-        // Sequential merge, in original db_paths order, so results are
-        // identical to the old single-threaded run regardless of how many
-        // workers actually did the work.
+        // Phase 2: slack scan, chunked by page range across *all* dbs at
+        // once - not one task per db like phase 1. This is the fix for
+        // the old ceiling where a single huge/corrupt db sat on one core
+        // no matter how many workers were free.
+        constexpr uint64_t kBytesPerChunk = 16ull * 1024 * 1024;
+        std::vector<SlackTask> slack_tasks;
+        std::vector<size_t> slack_begin(results.size()), slack_count(results.size());
+        for (size_t i = 0; i < results.size(); ++i) {
+            slack_begin[i] = slack_tasks.size();
+            if (results[i].failed) continue;
+            uint32_t psize = results[i].page_size ? results[i].page_size : 4096;
+            uint32_t chunk = std::max<uint32_t>(1, uint32_t(kBytesPerChunk / psize));
+            uint32_t pages = results[i].page_count;
+            for (uint32_t pg = 1; pg <= pages; pg += chunk)
+                slack_tasks.push_back({i, pg, std::min(pages + 1, pg + chunk)});
+            slack_count[i] = slack_tasks.size() - slack_begin[i];
+        }
+
+        std::vector<std::vector<Record>> chunk_results(slack_tasks.size());
+        std::atomic<size_t> next_task{0};
+        unsigned worker_count2 = static_cast<unsigned>(
+            std::min<size_t>(want_jobs, std::max<size_t>(1, slack_tasks.size())));
+
+        auto phase2 = [&]() {
+            for (;;) {
+                size_t j = next_task.fetch_add(1);
+                if (j >= slack_tasks.size()) return;
+                const SlackTask& t = slack_tasks[j];
+                DbOutcome& res = results[t.db_index];
+                try {
+                    recover_slack_range(*res.db, res.visited, t.pg_start, t.pg_end,
+                                        [&](Record&& r){ chunk_results[j].push_back(std::move(r)); });
+                } catch (...) { /* one bad chunk shouldn't drop the rest */ }
+            }
+        };
+
+        {
+            std::vector<std::thread> pool;
+            pool.reserve(worker_count2);
+            for (unsigned i = 0; i < worker_count2; ++i) pool.emplace_back(phase2);
+            for (auto& t : pool) t.join();
+        }
+
+        // Sequential merge, in db_paths order, so output is identical
+        // regardless of worker count or chunking.
         for (size_t i = 0; i < results.size(); ++i) {
             DbOutcome& res = results[i];
             if (res.failed) {
@@ -342,6 +378,16 @@ int main(int argc, char** argv) {
                 ++sum.failed;
                 continue;
             }
+
+            size_t before = res.residual.size();
+            for (size_t j = slack_begin[i]; j < slack_begin[i] + slack_count[i]; ++j)
+                res.residual.insert(res.residual.end(),
+                                    chunk_results[j].begin(), chunk_results[j].end());
+            res.slack_n = res.residual.size() - before;
+            log("slack records: " + std::to_string(res.slack_n));
+
+            label_records(res.residual, res.tables);
+            label_records(res.live, res.tables);
 
             // Timeline always pulls from both live and recovered, no matter
             // what --live is set to for the main dump

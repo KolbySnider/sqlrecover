@@ -249,12 +249,13 @@ void recover_freelist(const Database& db,
     }
 }
 
-void recover_slack(const Database& db,
-                   const std::vector<bool>& visited,
-                   const std::function<void(Record&&)>& sink) {
-    uint32_t pages = db.page_count();
+void recover_slack_range(const Database& db,
+                         const std::vector<bool>& visited,
+                         uint32_t pg_start, uint32_t pg_end,
+                         const std::function<void(Record&&)>& sink) {
+    uint32_t pages = std::min(pg_end - 1, db.page_count());
     uint32_t psize = db.page_size();
-    for (uint32_t pg = 1; pg <= pages; ++pg) {
+    for (uint32_t pg = pg_start; pg <= pages; ++pg) {
         const uint8_t* page;
         try { page = db.page(pg); } catch (...) { continue; }
         PageHeader ph = parse_page_header(page, psize, pg);

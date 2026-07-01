@@ -16,6 +16,7 @@
 
 #include <vector>
 #include <functional>
+#include <cstdint>
 #include "types.hpp"
 
 namespace sqlrecover {
@@ -33,19 +34,28 @@ void recover_freelist(const Database& db,
                       const std::vector<bool>& visited_live,
                       const std::function<void(Record&&)>& sink);
 
-/// @brief Scan slack and freeblock space on every leaf page. Pages that
-/// are structurally valid leaf tables but weren't touched by the live
-/// walk (orphaned - no schema root points at them, which is the common
-/// case when sqlite_master itself didn't survive) get their real cells
-/// decoded directly, the same way sqlite3's own `.recover` command
-/// treats every intact leaf page as a potential source of rows.
+/// @brief Scan slack and freeblock space on leaf pages in [pg_start,
+/// pg_end). Pages that are structurally valid leaf tables but weren't
+/// touched by the live walk (orphaned - no schema root points at them)
+/// get their real cells decoded directly, the same way sqlite3's own
+/// `.recover` command treats every intact leaf page as a potential
+/// source of rows.
+///
+/// Page-range bounded so a single large database can be split into
+/// chunks and scanned by multiple threads at once, instead of being
+/// stuck on whichever one thread claimed that database.
 /// @param db Source database.
 /// @param visited Pages already touched by the live walk. Sized to
-///                page_count()+2, as produced by walk_table_btree.
+///                page_count()+2, as produced by walk_table_btree. Must
+///                be fully populated before calling - not safe to read
+///                concurrently with the live walk that fills it in.
+/// @param pg_start First page to scan (1-based, inclusive).
+/// @param pg_end Last page to scan (exclusive).
 /// @param sink Callback invoked once per decoded row. Records get
 ///             origin = Slack.
-void recover_slack(const Database& db,
-                   const std::vector<bool>& visited,
-                   const std::function<void(Record&&)>& sink);
+void recover_slack_range(const Database& db,
+                         const std::vector<bool>& visited,
+                         uint32_t pg_start, uint32_t pg_end,
+                         const std::function<void(Record&&)>& sink);
 
 } // namespace sqlrecover

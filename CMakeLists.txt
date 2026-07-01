@@ -33,6 +33,10 @@ target_include_directories(sqlrecover PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 
+# Per-database recovery is parallelized across a thread pool.
+find_package(Threads REQUIRED)
+target_link_libraries(sqlrecover PRIVATE Threads::Threads)
+
 # Optional: physical-image carving via The Sleuth Kit. Enable with -DUSE_TSK=ON.
 # When on, the --image path can carve .db files out of a raw EXT4/F2FS image.
 option(USE_TSK "Link libtsk for raw image carving" OFF)

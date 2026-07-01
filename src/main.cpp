@@ -15,6 +15,9 @@
 #include <vector>
 #include <map>
 #include <filesystem>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 using namespace sqlrecover;
 namespace fs = std::filesystem;
@@ -40,6 +43,8 @@ constexpr const char* kUsage =
 "  --report             also write a human-readable report to stderr & file\n"
 "  --timeline           build a unified chronological timeline of dated events\n"
 "                       (SMS, calls, …) across live and recovered records\n"
+"  -j, --jobs N         worker threads for per-db recovery (default: auto,\n"
+"                       one per CPU core; each candidate db is independent)\n"
 "  -v, --verbose        per-stage progress on stderr\n"
 "  -h, --help           show this help\n"
 "\n"
@@ -57,6 +62,7 @@ struct Args {
     bool verbose = false;
     bool image = false;
     bool timeline = false;
+    unsigned    jobs = 0; ///< 0 = auto (hardware_concurrency)
 };
 
 /// @brief Print an argument error and exit with code 2.
@@ -89,6 +95,14 @@ Args parse_args(int argc, char** argv) {
         else if (s == "--timeline") a.timeline = true;
         else if (s == "--report")  a.report = true;
         else if (s == "-v" || s == "--verbose") a.verbose = true;
+        else if (s == "-j" || s == "--jobs") {
+            std::string v = next("--jobs");
+            try {
+                int n = std::stoi(v);
+                if (n <= 0) throw std::invalid_argument("");
+                a.jobs = static_cast<unsigned>(n);
+            } catch (...) { die_args("--jobs requires a positive integer"); }
+        }
         else if (!s.empty() && s[0] == '-') die_args("unknown option: " + s);
         else pos.push_back(s);
     }
@@ -148,22 +162,48 @@ void label_records(std::vector<Record>& recs, const std::vector<TableDef>& table
     }
 }
 
+/// @brief Everything one worker produces for one candidate db. Kept
+/// separate per-db so workers never touch shared state while running;
+/// a single-threaded pass afterward merges these in original db_paths
+/// order, reproducing exactly what the old sequential loop did.
+struct DbOutcome {
+    std::vector<Record> live;
+    std::vector<Record> residual;
+    std::string wal_file;
+    uint32_t page_size = 0;
+    uint32_t page_count = 0;
+    size_t freelist_n = 0;
+    size_t slack_n = 0;
+    size_t wal_n = 0;
+    bool failed = false;
+    std::string error;
+};
+
 } // namespace
 
 int main(int argc, char** argv) {
     Args args = parse_args(argc, argv);
+    std::mutex log_mutex;
     auto log = [&](const std::string& m) {
-        if (args.verbose) std::cerr << "[*] " << m << "\n";
+        if (!args.verbose) return;
+        std::lock_guard<std::mutex> lk(log_mutex);
+        std::cerr << "[*] " << m << "\n";
     };
 
     try {
+        // Resolved once and reused for carving, per-db recovery, and
+        // output formatting, so one --jobs value governs the whole
+        // pipeline consistently.
+        unsigned want_jobs = args.jobs != 0 ? args.jobs
+                            : std::max(1u, std::thread::hardware_concurrency());
+
         // Figure out which dbs to process. For a raw image, carve every
         // SQLite db out first; otherwise it's just the one input file.
         std::vector<std::string> db_paths;
         if (args.image) {
             std::string scratch = (fs::path(args.output) / "carved").string();
             log("carving databases from image " + args.input);
-            db_paths = carve_databases(args.input, scratch, args.verbose);
+            db_paths = carve_databases(args.input, scratch, args.verbose, want_jobs);
             if (db_paths.empty())
                 throw ParseError("no SQLite databases found in image: " + args.input);
             log("carved " + std::to_string(db_paths.size()) + " database(s)");
@@ -176,94 +216,139 @@ int main(int argc, char** argv) {
         RunSummary sum;
         sum.input_file = args.input;
 
-        for (const std::string& db_path : db_paths) {
-            // One malformed candidate (very common when carving out of
-            // slack/unallocated space) shouldn't cost the results already
-            // recovered from every other database, so failures here are
-            // isolated per-db rather than aborting the whole run.
-            try {
-                log("opening " + db_path);
-                Database db = Database::open(db_path);
+        // Every candidate db is independent (its own Database instance, no
+        // shared state), so recovery is parallelized across a worker pool.
+        // Each worker writes only to its own claimed slot in `results`
+        // (pre-sized before any thread starts, so no reallocation races);
+        // a single-threaded merge pass afterward walks `results` in
+        // original db_paths order and reproduces exactly what the old
+        // sequential loop did, so output ordering/content is unaffected by
+        // how many workers ran it.
+        std::vector<DbOutcome> results(db_paths.size());
+        std::atomic<size_t> next_index{0};
 
-                // Pick a WAL: explicit flag (only really makes sense for a
-                // single db), else the sidecar next to this db.
-                std::string wal_path = (!args.image && !args.wal.empty())
-                                     ? args.wal : std::string();
-                if (wal_path.empty()) {
-                    std::string guess = db_path + "-wal";
-                    if (fs::exists(guess)) wal_path = guess;
+        unsigned worker_count = static_cast<unsigned>(
+            std::min<size_t>(want_jobs, db_paths.size()));
+        if (worker_count == 0) worker_count = 1;
+        log("using " + std::to_string(worker_count) + " worker thread(s)");
+
+        auto worker = [&]() {
+            for (;;) {
+                size_t i = next_index.fetch_add(1);
+                if (i >= db_paths.size()) return;
+                const std::string& db_path = db_paths[i];
+                DbOutcome& res = results[i];
+
+                // One malformed candidate (very common when carving out of
+                // slack/unallocated space) shouldn't cost the results
+                // already recovered from every other database, so
+                // failures here are isolated per-db rather than aborting
+                // the whole run.
+                try {
+                    log("opening " + db_path);
+                    Database db = Database::open(db_path);
+
+                    // Pick a WAL: explicit flag (only really makes sense
+                    // for a single db), else the sidecar next to this db.
+                    std::string wal_path = (!args.image && !args.wal.empty())
+                                         ? args.wal : std::string();
+                    if (wal_path.empty()) {
+                        std::string guess = db_path + "-wal";
+                        if (fs::exists(guess)) wal_path = guess;
+                    }
+
+                    log("page size " + std::to_string(db.page_size()) +
+                        ", pages " + std::to_string(db.page_count()));
+
+                    std::vector<TableDef> tables = read_schema(db);
+                    log("schema: " + std::to_string(tables.size()) + " tables");
+
+                    std::vector<bool> visited(db.page_count() + 2, false);
+
+                    // 1. Live records (also marks visited pages). Grab the
+                    // table's column names so live output is fully labelled.
+                    for (const auto& t : tables) {
+                        const std::vector<std::string>& cols = t.columns;
+                        walk_table_btree(db, t.root_page, t.name, visited,
+                                         [&](Record&& r) {
+                                             if (cols.size() == r.values.size())
+                                                 r.column_names = cols;
+                                             res.live.push_back(std::move(r));
+                                         });
+                    }
+                    log("live records: " + std::to_string(res.live.size()));
+
+                    // 2. Freelist recovery
+                    size_t before = res.residual.size();
+                    recover_freelist(db, visited,
+                                     [&](Record&& r){ res.residual.push_back(std::move(r)); });
+                    res.freelist_n = res.residual.size() - before;
+                    log("freelist records: " + std::to_string(res.freelist_n));
+
+                    // 3. Slack-space recovery
+                    before = res.residual.size();
+                    recover_slack(db, visited,
+                                 [&](Record&& r){ res.residual.push_back(std::move(r)); });
+                    res.slack_n = res.residual.size() - before;
+                    log("slack records: " + std::to_string(res.slack_n));
+
+                    // 4. WAL prior-state recovery
+                    before = res.residual.size();
+                    if (!wal_path.empty())
+                        recover_wal(db, wal_path,
+                                    [&](Record&& r){ res.residual.push_back(std::move(r)); });
+                    res.wal_n = res.residual.size() - before;
+                    log("wal records: " + std::to_string(res.wal_n));
+
+                    label_records(res.residual, tables);
+                    label_records(res.live, tables);
+
+                    res.wal_file = wal_path;
+                    res.page_size = db.page_size();
+                    res.page_count = db.page_count();
+                } catch (const std::exception& e) {
+                    res.failed = true;
+                    res.error = e.what();
                 }
-
-                log("page size " + std::to_string(db.page_size()) +
-                    ", pages " + std::to_string(db.page_count()));
-
-                std::vector<TableDef> tables = read_schema(db);
-                log("schema: " + std::to_string(tables.size()) + " tables");
-
-                std::vector<Record> live, residual;
-                std::vector<bool> visited(db.page_count() + 2, false);
-
-                // 1. Live records (also marks visited pages). Grab the table's
-                // column names so live output is fully labelled.
-                for (const auto& t : tables) {
-                    const std::vector<std::string>& cols = t.columns;
-                    walk_table_btree(db, t.root_page, t.name, visited,
-                                     [&](Record&& r) {
-                                         if (cols.size() == r.values.size())
-                                             r.column_names = cols;
-                                         live.push_back(std::move(r));
-                                     });
-                }
-                log("live records: " + std::to_string(live.size()));
-
-                // 2. Freelist recovery
-                size_t before = residual.size();
-                recover_freelist(db, visited,
-                                 [&](Record&& r){ residual.push_back(std::move(r)); });
-                size_t freelist_n = residual.size() - before;
-                log("freelist records: " + std::to_string(freelist_n));
-
-                // 3. Slack-space recovery
-                before = residual.size();
-                recover_slack(db, visited, [&](Record&& r){ residual.push_back(std::move(r)); });
-                size_t slack_n = residual.size() - before;
-                log("slack records: " + std::to_string(slack_n));
-
-                // 4. WAL prior-state recovery
-                before = residual.size();
-                if (!wal_path.empty())
-                    recover_wal(db, wal_path,
-                                [&](Record&& r){ residual.push_back(std::move(r)); });
-                size_t wal_n = residual.size() - before;
-                log("wal records: " + std::to_string(wal_n));
-
-                label_records(residual, tables);
-                label_records(live, tables);
-
-                // Timeline always pulls from both live and recovered, no matter
-                // what --live is set to for the main dump
-                if (args.timeline) {
-                    tl_records.insert(tl_records.end(), live.begin(), live.end());
-                    tl_records.insert(tl_records.end(), residual.begin(), residual.end());
-                }
-
-                if (args.live) out.insert(out.end(), live.begin(), live.end());
-                out.insert(out.end(), residual.begin(), residual.end());
-
-                // page_size/page_count just reflect the last db when there's
-                // more than one; the per-origin counts sum across all of them
-                if (!wal_path.empty() && sum.wal_file.empty()) sum.wal_file = wal_path;
-                sum.page_size = db.page_size();
-                sum.page_count = db.page_count();
-                sum.live += args.live ? live.size() : 0;
-                sum.freelist += freelist_n;
-                sum.slack += slack_n;
-                sum.wal_prior += wal_n;
-            } catch (const std::exception& e) {
-                std::cerr << "warning: skipping " << db_path
-                          << " (" << e.what() << ")\n";
-                ++sum.failed;
             }
+        };
+
+        std::vector<std::thread> pool;
+        pool.reserve(worker_count);
+        for (unsigned i = 0; i < worker_count; ++i) pool.emplace_back(worker);
+        for (auto& t : pool) t.join();
+
+        // Sequential merge, in original db_paths order, so results are
+        // identical to the old single-threaded run regardless of how many
+        // workers actually did the work.
+        for (size_t i = 0; i < results.size(); ++i) {
+            DbOutcome& res = results[i];
+            if (res.failed) {
+                std::cerr << "warning: skipping " << db_paths[i]
+                          << " (" << res.error << ")\n";
+                ++sum.failed;
+                continue;
+            }
+
+            // Timeline always pulls from both live and recovered, no matter
+            // what --live is set to for the main dump
+            if (args.timeline) {
+                tl_records.insert(tl_records.end(), res.live.begin(), res.live.end());
+                tl_records.insert(tl_records.end(), res.residual.begin(), res.residual.end());
+            }
+
+            if (args.live) out.insert(out.end(), res.live.begin(), res.live.end());
+            out.insert(out.end(), res.residual.begin(), res.residual.end());
+
+            // page_size/page_count just reflect the last db when there's
+            // more than one; the per-origin counts sum across all of them
+            if (!res.wal_file.empty() && sum.wal_file.empty()) sum.wal_file = res.wal_file;
+            sum.page_size = res.page_size;
+            sum.page_count = res.page_count;
+            sum.live += args.live ? res.live.size() : 0;
+            sum.freelist += res.freelist_n;
+            sum.slack += res.slack_n;
+            sum.wal_prior += res.wal_n;
         }
 
         // Optional table filter on the aggregated set
@@ -286,9 +371,9 @@ int main(int argc, char** argv) {
         std::string rec_path = (fs::path(args.output) / ("records" + ext)).string();
         std::ofstream rf(rec_path, std::ios::binary);
         if (!rf) throw ParseError("cannot write output: " + rec_path);
-        if (args.format == "json")        write_json(rf, out);
-        else if (args.format == "jsonl")  write_jsonl(rf, out);
-        else                              write_csv(rf, out);
+        if (args.format == "json")        write_json(rf, out, want_jobs);
+        else if (args.format == "jsonl")  write_jsonl(rf, out, want_jobs);
+        else                              write_csv(rf, out, want_jobs);
         rf.close();
 
         if (args.report) {

@@ -29,6 +29,8 @@ struct RunSummary {
 /// @param records Records to dump.
 void write_json(std::ostream& os, const std::vector<Record>& records);
 
+void write_jsonl(std::ostream& os, const std::vector<Record>& records);
+
 /// @brief Write records as CSV.
 /// @param[out] os Stream to write to.
 /// @param records Records to dump.

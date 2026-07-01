@@ -134,7 +134,7 @@ json record_to_json(const Record& r) {
     if (!r.column_names.empty() &&
         r.column_names.size() == r.values.size()) {
         json cols = json::object();
-        for (auto i = 0; i < r.values.size(); ++i)
+        for (size_t i = 0; i < r.values.size(); ++i)
             cols[r.column_names[i]] = value_to_json(r.values[i]);
         jr["column_names"] = cols;
     }

@@ -22,6 +22,7 @@ struct RunSummary {
     size_t      wal_prior = 0;
     size_t      suspect = 0;
     size_t      artifacts = 0;
+    size_t      failed = 0;    ///< candidate dbs that errored out and were skipped
 };
 
 /// @brief Write records as JSON.

@@ -213,7 +213,11 @@ void write_report(std::ostream& os, const RunSummary& s) {
        << "  total           : "
        << (s.live + s.freelist + s.slack + s.wal_prior) << "\n"
        << "  of which suspect: " << s.suspect << "\n"
-       << "  matched artifact: " << s.artifacts << "\n\n"
+       << "  matched artifact: " << s.artifacts << "\n";
+    if (s.failed > 0)
+        os << "  dbs skipped     : " << s.failed
+           << " (malformed; see warnings above)\n";
+    os << "\n"
        << "Note: freelist, slack and wal records are residual data and are\n"
        << "recovered heuristically. 'suspect' rows parsed but didn't pass\n"
        << "the strength checks, so eyeball them before trusting.\n";

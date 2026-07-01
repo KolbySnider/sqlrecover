@@ -177,83 +177,93 @@ int main(int argc, char** argv) {
         sum.input_file = args.input;
 
         for (const std::string& db_path : db_paths) {
-            log("opening " + db_path);
-            Database db = Database::open(db_path);
+            // One malformed candidate (very common when carving out of
+            // slack/unallocated space) shouldn't cost the results already
+            // recovered from every other database, so failures here are
+            // isolated per-db rather than aborting the whole run.
+            try {
+                log("opening " + db_path);
+                Database db = Database::open(db_path);
 
-            // Pick a WAL: explicit flag (only really makes sense for a
-            // single db), else the sidecar next to this db.
-            std::string wal_path = (!args.image && !args.wal.empty())
-                                 ? args.wal : std::string();
-            if (wal_path.empty()) {
-                std::string guess = db_path + "-wal";
-                if (fs::exists(guess)) wal_path = guess;
+                // Pick a WAL: explicit flag (only really makes sense for a
+                // single db), else the sidecar next to this db.
+                std::string wal_path = (!args.image && !args.wal.empty())
+                                     ? args.wal : std::string();
+                if (wal_path.empty()) {
+                    std::string guess = db_path + "-wal";
+                    if (fs::exists(guess)) wal_path = guess;
+                }
+
+                log("page size " + std::to_string(db.page_size()) +
+                    ", pages " + std::to_string(db.page_count()));
+
+                std::vector<TableDef> tables = read_schema(db);
+                log("schema: " + std::to_string(tables.size()) + " tables");
+
+                std::vector<Record> live, residual;
+                std::vector<bool> visited(db.page_count() + 2, false);
+
+                // 1. Live records (also marks visited pages). Grab the table's
+                // column names so live output is fully labelled.
+                for (const auto& t : tables) {
+                    const std::vector<std::string>& cols = t.columns;
+                    walk_table_btree(db, t.root_page, t.name, visited,
+                                     [&](Record&& r) {
+                                         if (cols.size() == r.values.size())
+                                             r.column_names = cols;
+                                         live.push_back(std::move(r));
+                                     });
+                }
+                log("live records: " + std::to_string(live.size()));
+
+                // 2. Freelist recovery
+                size_t before = residual.size();
+                recover_freelist(db, visited,
+                                 [&](Record&& r){ residual.push_back(std::move(r)); });
+                size_t freelist_n = residual.size() - before;
+                log("freelist records: " + std::to_string(freelist_n));
+
+                // 3. Slack-space recovery
+                before = residual.size();
+                recover_slack(db, visited, [&](Record&& r){ residual.push_back(std::move(r)); });
+                size_t slack_n = residual.size() - before;
+                log("slack records: " + std::to_string(slack_n));
+
+                // 4. WAL prior-state recovery
+                before = residual.size();
+                if (!wal_path.empty())
+                    recover_wal(db, wal_path,
+                                [&](Record&& r){ residual.push_back(std::move(r)); });
+                size_t wal_n = residual.size() - before;
+                log("wal records: " + std::to_string(wal_n));
+
+                label_records(residual, tables);
+                label_records(live, tables);
+
+                // Timeline always pulls from both live and recovered, no matter
+                // what --live is set to for the main dump
+                if (args.timeline) {
+                    tl_records.insert(tl_records.end(), live.begin(), live.end());
+                    tl_records.insert(tl_records.end(), residual.begin(), residual.end());
+                }
+
+                if (args.live) out.insert(out.end(), live.begin(), live.end());
+                out.insert(out.end(), residual.begin(), residual.end());
+
+                // page_size/page_count just reflect the last db when there's
+                // more than one; the per-origin counts sum across all of them
+                if (!wal_path.empty() && sum.wal_file.empty()) sum.wal_file = wal_path;
+                sum.page_size = db.page_size();
+                sum.page_count = db.page_count();
+                sum.live += args.live ? live.size() : 0;
+                sum.freelist += freelist_n;
+                sum.slack += slack_n;
+                sum.wal_prior += wal_n;
+            } catch (const std::exception& e) {
+                std::cerr << "warning: skipping " << db_path
+                          << " (" << e.what() << ")\n";
+                ++sum.failed;
             }
-
-            log("page size " + std::to_string(db.page_size()) +
-                ", pages " + std::to_string(db.page_count()));
-
-            std::vector<TableDef> tables = read_schema(db);
-            log("schema: " + std::to_string(tables.size()) + " tables");
-
-            std::vector<Record> live, residual;
-            std::vector<bool> visited(db.page_count() + 2, false);
-
-            // 1. Live records (also marks visited pages). Grab the table's
-            // column names so live output is fully labelled.
-            for (const auto& t : tables) {
-                const std::vector<std::string>& cols = t.columns;
-                walk_table_btree(db, t.root_page, t.name, visited,
-                                 [&](Record&& r) {
-                                     if (cols.size() == r.values.size())
-                                         r.column_names = cols;
-                                     live.push_back(std::move(r));
-                                 });
-            }
-            log("live records: " + std::to_string(live.size()));
-
-            // 2. Freelist recovery
-            size_t before = residual.size();
-            recover_freelist(db, visited,
-                             [&](Record&& r){ residual.push_back(std::move(r)); });
-            size_t freelist_n = residual.size() - before;
-            log("freelist records: " + std::to_string(freelist_n));
-
-            // 3. Slack-space recovery
-            before = residual.size();
-            recover_slack(db, visited, [&](Record&& r){ residual.push_back(std::move(r)); });
-            size_t slack_n = residual.size() - before;
-            log("slack records: " + std::to_string(slack_n));
-
-            // 4. WAL prior-state recovery
-            before = residual.size();
-            if (!wal_path.empty())
-                recover_wal(db, wal_path,
-                            [&](Record&& r){ residual.push_back(std::move(r)); });
-            size_t wal_n = residual.size() - before;
-            log("wal records: " + std::to_string(wal_n));
-
-            label_records(residual, tables);
-            label_records(live, tables);
-
-            // Timeline always pulls from both live and recovered, no matter
-            // what --live is set to for the main dump
-            if (args.timeline) {
-                tl_records.insert(tl_records.end(), live.begin(), live.end());
-                tl_records.insert(tl_records.end(), residual.begin(), residual.end());
-            }
-
-            if (args.live) out.insert(out.end(), live.begin(), live.end());
-            out.insert(out.end(), residual.begin(), residual.end());
-
-            // page_size/page_count just reflect the last db when there's
-            // more than one; the per-origin counts sum across all of them
-            if (!wal_path.empty() && sum.wal_file.empty()) sum.wal_file = wal_path;
-            sum.page_size = db.page_size();
-            sum.page_count = db.page_count();
-            sum.live += args.live ? live.size() : 0;
-            sum.freelist += freelist_n;
-            sum.slack += slack_n;
-            sum.wal_prior += wal_n;
         }
 
         // Optional table filter on the aggregated set

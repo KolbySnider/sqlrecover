@@ -24,10 +24,8 @@ struct Signature {
     int64_t              magic_offset; ///< file_start = match_pos - magic_offset
 };
 
-/// @brief Structured formats only: each has either a header size field or
-/// a well-defined terminator, keeping false-positive risk low. Formats
-/// with no magic bytes at all (plain text) aren't covered by this table.
-//  I made this as I thought file waking nts4 
+/// @brief Only structured formats with a header size field or clear
+/// terminator - keeps false positives low. Plain text formats aren't covered.
 const std::vector<Signature>& signature_table() {
     static const std::vector<Signature> table = {
         {"jpeg", "jpg", {0xFF, 0xD8, 0xFF}, 0},
@@ -36,8 +34,7 @@ const std::vector<Signature>& signature_table() {
         {"gif",  "gif", {'G','I','F','8','9','a'}, 0},
         {"bmp",  "bmp", {'B','M'}, 0},
         {"pdf",  "pdf", {'%','P','D','F','-'}, 0},
-        // mp4/mov: box format is [4-byte size][4-byte type]...; "ftyp" is
-        // the type of the first box, sitting 4 bytes into it.
+        // mp4/mov: box is [4-byte size][4-byte type]...; "ftyp" sits 4 bytes in.
         {"mp4",  "mp4", {'f','t','y','p'}, 4},
         {"wav",  "wav", {'R','I','F','F'}, 0},
     };
@@ -46,8 +43,7 @@ const std::vector<Signature>& signature_table() {
 
 constexpr uint64_t kMaxFootprint = 200ull * 1024 * 1024; ///< sanity cap per file
 
-/// @brief A candidate file header found during the scan phase, before
-/// span (and thus dedup) is worked out.
+/// @brief A signature match found during the scan phase, before its span is sized.
 struct RawHit {
     uint64_t pos;      ///< absolute file offset of the true file start
     size_t   sig_idx;  ///< index into signature_table()
@@ -61,8 +57,7 @@ struct SizedHit {
     bool     confident; ///< false if sizing hit the cap without a real terminator
 };
 
-/// @brief Small helper: read n bytes at an absolute offset. Returns the
-/// number of bytes actually read (may be less at EOF).
+/// @brief Read n bytes at an absolute offset; returns bytes actually read (may be less at EOF).
 size_t read_at(std::ifstream& f, uint64_t pos, uint8_t* buf, size_t n) {
     f.seekg(static_cast<std::streamoff>(pos));
     f.read(reinterpret_cast<char*>(buf), static_cast<std::streamsize>(n));
@@ -81,13 +76,11 @@ uint64_t read_be64(const uint8_t* p) {
     return v;
 }
 
-/// @brief BMP/WAV: size is a little-endian field in the fixed header, no
-/// need to read anything beyond it.
+/// @brief BMP/WAV: size is a little-endian field in the fixed header.
 bool size_from_header_field(std::ifstream& f, uint64_t pos, const char* label, uint64_t& span) {
     uint8_t hdr[16];
     if (std::strcmp(label, "bmp") == 0) {
-        // "BM" alone is a weak, easily-coincidental 2-byte magic. Real
-        // BMP files always have both reserved fields (bytes 6-9) zero;
+        // "BM" alone is a weak 2-byte magic; require the reserved bytes 6-9 to be zero too.
         if (read_at(f, pos, hdr, 10) < 10) return false;
         if (hdr[6] != 0 || hdr[7] != 0 || hdr[8] != 0 || hdr[9] != 0) return false;
         uint64_t sz = read_le32(hdr + 2);
@@ -95,8 +88,8 @@ bool size_from_header_field(std::ifstream& f, uint64_t pos, const char* label, u
         span = sz;
         return true;
     }
-    // wav: RIFF chunk size at bytes 4-7 is (total size - 8); must also be
-    // a WAVE riff, not some other RIFF-based container (AVI, WEBP, ...).
+    // RIFF chunk size at bytes 4-7 is (total size - 8); must be a WAVE riff
+    // specifically, not some other RIFF container like AVI or WEBP.
     if (read_at(f, pos, hdr, 12) < 12) return false;
     if (std::memcmp(hdr + 8, "WAVE", 4) != 0) return false;
     uint64_t chunk_size = read_le32(hdr + 4);
@@ -106,9 +99,8 @@ bool size_from_header_field(std::ifstream& f, uint64_t pos, const char* label, u
     return true;
 }
 
-/// @brief PNG: walk the chunk structure (4-byte length + 4-byte type +
-/// data + 4-byte CRC) until an IEND chunk, summing lengths as we go.
-/// Only chunk headers are read; chunk data is skipped over with seeks.
+/// @brief PNG: walk chunks (4-byte length + 4-byte type + data + 4-byte CRC)
+/// until IEND, summing lengths. Only headers are read; data is skipped via seeks.
 bool span_png(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) {
     uint64_t off = 8; // past the 8-byte PNG signature
     for (int guard = 0; guard < 100000; ++guard) {
@@ -125,11 +117,9 @@ bool span_png(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) {
     return true;
 }
 
-/// @brief MP4/MOV: walk top-level boxes (4-byte size + 4-byte type,
-/// handling the 64-bit "largesize" extension) until the next box header
-/// can't be read - MP4 has no explicit end marker, the file just stops
-/// after the last box. Only box headers are read; box payloads are
-/// skipped over with seeks.
+/// @brief MP4/MOV: walk top-level boxes (4-byte size + 4-byte type, plus
+/// the 64-bit largesize extension) until a box header fails to read - MP4
+/// has no end marker, it just stops after the last box.
 bool span_mp4(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) {
     uint64_t off = 0;
     for (int guard = 0; guard < 100000; ++guard) {
@@ -157,12 +147,9 @@ bool span_mp4(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) {
     return true;
 }
 
-/// @brief PDF: search forward for the *last* %%EOF within a capped
-/// window - PDFs can have multiple incremental-update trailers, each
-/// ending in %%EOF, and the last one is the true end. Safe to search
-/// naively (unlike JPEG/GIF below): %%EOF is a specific 5-byte ASCII
-/// sequence, astronomically less likely to appear by chance inside a
-/// compressed stream than JPEG's 2-byte or GIF's 1-byte terminators.
+/// @brief PDF: find the *last* %%EOF in a capped window - incremental-update
+/// trailers each end in %%EOF, and the last one is the real end. Safe to
+/// search naively, unlike JPEG/GIF: 5 ASCII bytes rarely collide by chance.
 bool span_pdf(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) {
     static const std::vector<uint8_t> term = {'%','%','E','O','F'};
     constexpr size_t CHUNK = 1 * 1024 * 1024;
@@ -188,15 +175,9 @@ bool span_pdf(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) {
     return true;
 }
 
-/// @brief Is this a marker code a real-world JPEG encoder actually
-/// emits? Baseline/progressive DCT+Huffman covers the overwhelming
-/// majority of real photos; the various arithmetic-coding and reserved
-/// SOF variants (C5-CB, CD-CF, F0-FD, ...) are essentially never
-/// produced in practice. Treating one of those as a genuine marker
-/// (rather than a coincidental byte pattern in corrupted/overwritten
-/// data) is what let 3 genuinely-damaged recovered images run past their
-/// real end this session, each starting with exactly this kind of
-/// exotic, unused marker code right where real data ran out.
+/// @brief Marker codes real encoders actually emit (baseline/progressive
+/// DCT+Huffman). Rare/reserved variants are excluded since they're more
+/// likely a coincidental byte pattern in damaged data than a real marker.
 bool is_common_jpeg_marker(uint8_t m) {
     switch (m) {
         case 0xC0: case 0xC1: case 0xC2: case 0xC3: // SOF0-3
@@ -214,19 +195,13 @@ bool is_common_jpeg_marker(uint8_t m) {
     }
 }
 
-/// @brief JPEG: real JPEG images very commonly sit back-to-back in a
-/// photo/thumbnail cache area, so a naive "search for FF D9 and take the
-/// last one within a big cap" reliably merges many separate photos into
-/// one - confirmed against a real recovered image this session (129
-/// distinct JPEG start markers within 10MB of a single hit). Entropy-coded
-/// scan data is also quasi-random and can contain many incidental FF D9
-/// byte pairs of its own. The correct fix is to actually walk the marker
-/// segments (using each one's own length field to skip its payload, which
-/// also correctly skips over an embedded EXIF thumbnail's own EOI), then
-/// scan the entropy-coded data byte-by-byte respecting byte-stuffing
-/// (FF 00) and restart markers (FF D0-D7) - both of which real encoders
-/// use specifically so a literal FF in the compressed data can never be
-/// mistaken for a marker.
+/// @brief JPEG: JPEGs often sit back-to-back in photo/thumbnail caches, so
+/// grabbing the last FF D9 in a big window tends to merge several photos
+/// into one, and entropy-coded scan data can contain incidental FF D9
+/// pairs anyway. So walk marker segments properly (each one's length
+/// field skips its payload, including an embedded EXIF thumbnail's own
+/// EOI), then scan entropy-coded data byte-by-byte respecting byte
+/// stuffing (FF 00) and restart markers (FF D0-D7).
 bool span_jpeg(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) {
     uint64_t off = 2; // past FFD8 (SOI)
     for (int guard = 0; guard < 10000; ++guard) {
@@ -235,9 +210,7 @@ bool span_jpeg(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) 
         if (read_at(f, pos + off, hdr, 4) < 4) { confident = false; span = off; return true; }
         if (hdr[0] != 0xFF) { confident = false; span = off; return true; } // structure broke
         uint8_t marker = hdr[1];
-        // The spec allows any number of 0xFF fill bytes before the real
-        // marker code; skip one and re-check rather than treating a
-        // second 0xFF as if it were the marker itself.
+        // Spec allows fill bytes before the real marker; skip and re-check.
         if (marker == 0xFF) { off += 1; continue; }
         if (marker == 0xD9) { span = off + 2; confident = true; return true; } // EOI, empty scan
         if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD8)) { off += 2; continue; } // no payload
@@ -245,16 +218,10 @@ bool span_jpeg(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) 
         uint16_t seg_len = (uint16_t(hdr[2]) << 8) | hdr[3]; // includes these 2 length bytes
         if (seg_len < 2) { confident = false; span = off; return true; }
         if (marker == 0xDA) {
-            // Start of Scan: skip its header, then the entropy-coded data
-            // that follows has no length prefix - scan it byte-by-byte.
-            // The next real marker found often isn't EOI: progressive
-            // JPEGs interleave multiple scans, each its own SOS preceded
-            // by more DHT/DQT segments, so anything other than D9 means
-            // "resume normal segment parsing right here", not "stop"
-            // (confirmed against a real progressive JPEG this session -
-            // stopping at the first post-scan marker cut the file off
-            // partway through, well before its real DHT+SOS+entropy+EOI
-            // tail).
+            // Start of Scan: entropy-coded data follows with no length
+            // prefix, so scan byte-by-byte. Progressive JPEGs interleave
+            // multiple scans, so a marker other than D9 here just means
+            // "resume normal segment parsing", not "stop".
             off += 2 + seg_len;
             constexpr size_t CHUNK = 1 * 1024 * 1024;
             std::vector<uint8_t> buf(CHUNK);
@@ -265,15 +232,11 @@ bool span_jpeg(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) 
                 for (size_t i = 0; i + 1 < got; ++i) {
                     if (buf[i] != 0xFF) continue;
                     uint8_t nxt = buf[i + 1];
-                    // Stuffed byte or restart marker: consumed as a pair,
-                    // advance past both (the loop's own ++i plus this
-                    // one). A fill byte (spec allows any number of 0xFF
-                    // before the real marker) must NOT be double-advanced
-                    // - buf[i+1] is itself a fresh potential marker-start
-                    // (e.g. "FF FF D9" is fill-byte + EOI, and skipping 2
-                    // would step past the D9 without ever examining it),
-                    // so just fall through and let the loop's own ++i
-                    // move to it.
+                    // Stuffed byte or restart marker: skip both.
+                    // A fill 0xFF must NOT be double-skipped though -
+                    // buf[i+1] could itself be a real marker start (e.g.
+                    // "FF FF D9" is fill + EOI), so just fall through and
+                    // let the loop's ++i land on it next iteration.
                     if (nxt == 0x00 || (nxt >= 0xD0 && nxt <= 0xD7)) { ++i; continue; }
                     if (nxt == 0xFF) continue;
                     if (nxt == 0xD9) { span = off + i + 2; confident = true; return true; }
@@ -294,12 +257,10 @@ bool span_jpeg(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) 
     return true;
 }
 
-/// @brief GIF: same reasoning as JPEG - a bare trailer *byte* (0x3B) is
-/// even more likely to appear incidentally inside LZW-compressed image
-/// data than JPEG's 2-byte marker, so this walks the actual block
-/// structure (extension and image blocks, each a sequence of
-/// length-prefixed sub-blocks terminated by a zero-length sub-block)
-/// rather than searching for the trailer byte directly.
+/// @brief GIF: same idea as JPEG - a bare trailer byte (0x3B) collides
+/// easily inside LZW image data, so walk the actual block structure
+/// (extension and image blocks, each length-prefixed sub-blocks ending in
+/// a 0-length one) instead of searching for the trailer directly.
 bool span_gif(std::ifstream& f, uint64_t pos, uint64_t& span, bool& confident) {
     uint8_t screen[13];
     if (read_at(f, pos, screen, 13) < 13) { confident = false; span = 6; return true; }
@@ -368,12 +329,6 @@ bool determine_span(std::ifstream& f, uint64_t pos, size_t sig_idx,
 }
 
 /// @brief Scan one byte range of the image for file-type signatures.
-/// Same shape as image.cpp's scan_range: own stream per thread, buffered
-/// chunk reads, 512-byte alignment (real files begin on filesystem block
-/// boundaries), exclusive range ownership so threads never need to
-/// coordinate. Span isn't determined here - that needs unbounded forward
-/// reads that don't fit the fixed-size sliding buffer, so it happens
-/// later against a fresh stream per hit.
 std::vector<RawHit> scan_file_range(const std::string& image_path, uint64_t start, uint64_t end) {
     const auto& sigs = signature_table();
     size_t max_magic_len = 0;
@@ -473,13 +428,8 @@ std::vector<RecoveredFile> carve_files(const std::string& image_path,
     std::sort(raw.begin(), raw.end(),
              [](const RawHit& a, const RawHit& b) { return a.pos < b.pos; });
 
-    // Phase 2: sequential size + dedup. Each decision depends on the
-    // previous accepted hit's real span, so this can't run ahead of
-    // itself in parallel - same position-based-coverage approach as the
-    // SQLite carver's dedup pass, extended with the same "a low-confidence
-    // guess only claims its own position" lesson (a footer search that
-    // hit the cap without a real terminator must not blank out real files
-    // that follow it, just like a fallback-clamped SQLite span).
+    // Phase 2: sequential size + dedup - each decision depends on the
+    // previous accepted hit's span, so this can't parallelize.
     std::vector<SizedHit> deduped;
     deduped.reserve(raw.size());
     uint64_t covered_until = 0;

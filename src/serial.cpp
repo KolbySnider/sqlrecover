@@ -70,10 +70,7 @@ bool decode_record(const uint8_t* payload, size_t avail,
         serials.push_back(sv.value);
     }
     if (hp != header_len) return false; // header didn't end cleanly
-
-    // sanity check, pretty sure SQLite tables are not going to be bigger than 2000 let alone
-    //  4096
-    if (serials.size() > 4096) return false;
+    if (serials.size() > 64) return false;
 
     for (uint64_t st : serials) {
         uint64_t sz = serial_type_size(st);

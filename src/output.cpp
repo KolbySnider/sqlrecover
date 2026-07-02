@@ -161,7 +161,7 @@ json record_to_json(const Record& r) {
 
     json prov;
     prov["source_file"] = r.prov.source_file;
-    prov["origin"]      = r.prov.origin;
+    prov["origin"]      = to_string(r.prov.origin);
     prov["page_no"]     = r.prov.page_no;
     prov["byte_offset"] = r.prov.byte_offset;
     if (r.prov.wal_frame) prov["wal_frame"] = *r.prov.wal_frame;

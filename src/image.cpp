@@ -1,13 +1,12 @@
 #include "image.hpp"
 #include "util.hpp"
+#include "parallel.hpp"
 #include <fstream>
 #include <iostream>
 #include <filesystem>
 #include <cstring>
 #include <algorithm>
-#include <thread>
 #include <mutex>
-#include <atomic>
 
 namespace fs = std::filesystem;
 
@@ -183,19 +182,12 @@ std::vector<std::string> carve_by_signature(const std::string& image_path,
     // Phase 1: parallel scan. Each worker collects into its own vector so
     // no locking is needed while threads are running.
     std::vector<std::vector<Hit>> per_thread(worker_count);
-    {
-        std::vector<std::thread> pool;
-        pool.reserve(worker_count);
-        for (unsigned w = 0; w < worker_count; ++w) {
-            uint64_t start = w * range_size;
-            uint64_t end   = std::min(image_size, start + range_size);
-            if (start >= end) continue;
-            pool.emplace_back([&, start, end, w]() {
-                per_thread[w] = scan_range(image_path, start, end);
-            });
-        }
-        for (auto& t : pool) t.join();
-    }
+    parallel_for(worker_count, worker_count, [&](size_t w) {
+        uint64_t start = w * range_size;
+        uint64_t end   = std::min(image_size, start + range_size);
+        if (start >= end) return;
+        per_thread[w] = scan_range(image_path, start, end);
+    });
 
     // Phase 2: cheap sequential merge, sort, and dedup. Concatenation
     // order across threads is already ascending (thread w owns a lower
@@ -231,45 +223,35 @@ std::vector<std::string> carve_by_signature(const std::string& image_path,
     std::vector<std::string> out(hits.size());
     if (hits.empty()) return out;
 
-    std::atomic<size_t> next_index{0};
     std::mutex log_mutex;
     unsigned extract_workers = static_cast<unsigned>(
         std::min<size_t>(worker_count, hits.size()));
 
-    auto extractor = [&]() {
-        for (;;) {
-            size_t i = next_index.fetch_add(1);
-            if (i >= hits.size()) return;
-            const Hit& h = hits[i];
+    parallel_for(hits.size(), extract_workers, [&](size_t i) {
+        const Hit& h = hits[i];
 
-            std::string path = (fs::path(out_dir) /
-                ("carved_" + std::to_string(i) + ".db")).string();
+        std::string path = (fs::path(out_dir) /
+            ("carved_" + std::to_string(i) + ".db")).string();
 
-            std::ifstream src(image_path, std::ios::binary);
-            src.seekg(static_cast<std::streamoff>(h.pos));
-            std::vector<uint8_t> db_buf(static_cast<size_t>(h.span));
-            src.read(reinterpret_cast<char*>(db_buf.data()),
-                     static_cast<std::streamsize>(h.span));
-            size_t actual = static_cast<size_t>(src.gcount());
-            db_buf.resize(actual);
-            std::ofstream o(path, std::ios::binary);
-            o.write(reinterpret_cast<const char*>(db_buf.data()),
-                    static_cast<std::streamsize>(actual));
+        std::ifstream src(image_path, std::ios::binary);
+        src.seekg(static_cast<std::streamoff>(h.pos));
+        std::vector<uint8_t> db_buf(static_cast<size_t>(h.span));
+        src.read(reinterpret_cast<char*>(db_buf.data()),
+                 static_cast<std::streamsize>(h.span));
+        size_t actual = static_cast<size_t>(src.gcount());
+        db_buf.resize(actual);
+        std::ofstream o(path, std::ios::binary);
+        o.write(reinterpret_cast<const char*>(db_buf.data()),
+                static_cast<std::streamsize>(actual));
 
-            if (verbose) {
-                std::lock_guard<std::mutex> lk(log_mutex);
-                std::cerr << "[*] carved " << path
-                          << " at offset " << h.pos
-                          << " (" << actual << " bytes)\n";
-            }
-            out[i] = std::move(path);
+        if (verbose) {
+            std::lock_guard<std::mutex> lk(log_mutex);
+            std::cerr << "[*] carved " << path
+                      << " at offset " << h.pos
+                      << " (" << actual << " bytes)\n";
         }
-    };
-
-    std::vector<std::thread> pool;
-    pool.reserve(extract_workers);
-    for (unsigned w = 0; w < extract_workers; ++w) pool.emplace_back(extractor);
-    for (auto& t : pool) t.join();
+        out[i] = std::move(path);
+    });
 
     return out;
 }

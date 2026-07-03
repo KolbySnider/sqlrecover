@@ -9,6 +9,7 @@
 #include "image.hpp"
 #include "filecarve.hpp"
 #include "util.hpp"
+#include "parallel.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -18,7 +19,6 @@
 #include <filesystem>
 #include <thread>
 #include <mutex>
-#include <atomic>
 #include <optional>
 
 using namespace sqlrecover;
@@ -244,86 +244,74 @@ int main(int argc, char** argv) {
         // worker per db here - cheap relative to slack scanning, and
         // scales with live row count rather than page count.
         std::vector<DbOutcome> results(db_paths.size());
-        std::atomic<size_t> next_db{0};
 
         unsigned worker_count = static_cast<unsigned>(
             std::min<size_t>(want_jobs, db_paths.size()));
         if (worker_count == 0) worker_count = 1;
         log("using " + std::to_string(worker_count) + " worker thread(s)");
 
-        auto phase1 = [&]() {
-            for (;;) {
-                size_t i = next_db.fetch_add(1);
-                if (i >= db_paths.size()) return;
-                const std::string& db_path = db_paths[i];
-                DbOutcome& res = results[i];
+        parallel_for(db_paths.size(), worker_count, [&](size_t i) {
+            const std::string& db_path = db_paths[i];
+            DbOutcome& res = results[i];
 
-                // One malformed candidate shouldn't cost every other
-                // database's results, so failures are isolated per-db.
-                try {
-                    log("opening " + db_path);
-                    Database db = Database::open(db_path);
+            // One malformed candidate shouldn't cost every other
+            // database's results, so failures are isolated per-db.
+            try {
+                log("opening " + db_path);
+                Database db = Database::open(db_path);
 
-                    // Pick a WAL: explicit flag (only really makes sense
-                    // for a single db), else the sidecar next to this db.
-                    std::string wal_path = (!args.image && !args.wal.empty())
-                                         ? args.wal : std::string();
-                    if (wal_path.empty()) {
-                        std::string guess = db_path + "-wal";
-                        if (fs::exists(guess)) wal_path = guess;
-                    }
-
-                    log("page size " + std::to_string(db.page_size()) +
-                        ", pages " + std::to_string(db.page_count()));
-
-                    res.tables = read_schema(db);
-                    log("schema: " + std::to_string(res.tables.size()) + " tables");
-
-                    res.visited.assign(db.page_count() + 2, false);
-
-                    // Live records also mark visited pages, so slack
-                    // scanning (phase 2) knows which pages are orphans.
-                    for (const auto& t : res.tables) {
-                        const std::vector<std::string>& cols = t.columns;
-                        walk_table_btree(db, t.root_page, t.name, res.visited,
-                                         [&](Record&& r) {
-                                             if (cols.size() == r.values.size())
-                                                 r.column_names = cols;
-                                             res.live.push_back(std::move(r));
-                                         });
-                    }
-                    log("live records: " + std::to_string(res.live.size()));
-
-                    size_t before = res.residual.size();
-                    recover_freelist(db, res.visited,
-                                     [&](Record&& r){ res.residual.push_back(std::move(r)); });
-                    res.freelist_n = res.residual.size() - before;
-                    log("freelist records: " + std::to_string(res.freelist_n));
-
-                    before = res.residual.size();
-                    if (!wal_path.empty())
-                        recover_wal(db, wal_path,
-                                    [&](Record&& r){ res.residual.push_back(std::move(r)); });
-                    res.wal_n = res.residual.size() - before;
-                    log("wal records: " + std::to_string(res.wal_n));
-
-                    res.wal_file = wal_path;
-                    res.page_size = db.page_size();
-                    res.page_count = db.page_count();
-                    res.db = std::move(db); // kept alive for phase 2
-                } catch (const std::exception& e) {
-                    res.failed = true;
-                    res.error = e.what();
+                // Pick a WAL: explicit flag (only really makes sense
+                // for a single db), else the sidecar next to this db.
+                std::string wal_path = (!args.image && !args.wal.empty())
+                                     ? args.wal : std::string();
+                if (wal_path.empty()) {
+                    std::string guess = db_path + "-wal";
+                    if (fs::exists(guess)) wal_path = guess;
                 }
-            }
-        };
 
-        {
-            std::vector<std::thread> pool;
-            pool.reserve(worker_count);
-            for (unsigned i = 0; i < worker_count; ++i) pool.emplace_back(phase1);
-            for (auto& t : pool) t.join();
-        }
+                log("page size " + std::to_string(db.page_size()) +
+                    ", pages " + std::to_string(db.page_count()));
+
+                res.tables = read_schema(db);
+                log("schema: " + std::to_string(res.tables.size()) + " tables");
+
+                res.visited.assign(db.page_count() + 2, false);
+
+                // Live records also mark visited pages, so slack
+                // scanning (phase 2) knows which pages are orphans.
+                for (const auto& t : res.tables) {
+                    const std::vector<std::string>& cols = t.columns;
+                    walk_table_btree(db, t.root_page, t.name, res.visited,
+                                     [&](Record&& r) {
+                                         if (cols.size() == r.values.size())
+                                             r.column_names = cols;
+                                         res.live.push_back(std::move(r));
+                                     });
+                }
+                log("live records: " + std::to_string(res.live.size()));
+
+                size_t before = res.residual.size();
+                recover_freelist(db, res.visited,
+                                 [&](Record&& r){ res.residual.push_back(std::move(r)); });
+                res.freelist_n = res.residual.size() - before;
+                log("freelist records: " + std::to_string(res.freelist_n));
+
+                before = res.residual.size();
+                if (!wal_path.empty())
+                    recover_wal(db, wal_path,
+                                [&](Record&& r){ res.residual.push_back(std::move(r)); });
+                res.wal_n = res.residual.size() - before;
+                log("wal records: " + std::to_string(res.wal_n));
+
+                res.wal_file = wal_path;
+                res.page_size = db.page_size();
+                res.page_count = db.page_count();
+                res.db = std::move(db); // kept alive for phase 2
+            } catch (const std::exception& e) {
+                res.failed = true;
+                res.error = e.what();
+            }
+        });
 
         // Phase 2: slack scan, chunked by page range across *all* dbs at
         // once - not one task per db like phase 1. This is the fix for
@@ -344,29 +332,17 @@ int main(int argc, char** argv) {
         }
 
         std::vector<std::vector<Record>> chunk_results(slack_tasks.size());
-        std::atomic<size_t> next_task{0};
         unsigned worker_count2 = static_cast<unsigned>(
             std::min<size_t>(want_jobs, std::max<size_t>(1, slack_tasks.size())));
 
-        auto phase2 = [&]() {
-            for (;;) {
-                size_t j = next_task.fetch_add(1);
-                if (j >= slack_tasks.size()) return;
-                const SlackTask& t = slack_tasks[j];
-                DbOutcome& res = results[t.db_index];
-                try {
-                    recover_slack_range(*res.db, res.visited, t.pg_start, t.pg_end,
-                                        [&](Record&& r){ chunk_results[j].push_back(std::move(r)); });
-                } catch (...) { /* one bad chunk shouldn't drop the rest */ }
-            }
-        };
-
-        {
-            std::vector<std::thread> pool;
-            pool.reserve(worker_count2);
-            for (unsigned i = 0; i < worker_count2; ++i) pool.emplace_back(phase2);
-            for (auto& t : pool) t.join();
-        }
+        parallel_for(slack_tasks.size(), worker_count2, [&](size_t j) {
+            const SlackTask& t = slack_tasks[j];
+            DbOutcome& res = results[t.db_index];
+            try {
+                recover_slack_range(*res.db, res.visited, t.pg_start, t.pg_end,
+                                    [&](Record&& r){ chunk_results[j].push_back(std::move(r)); });
+            } catch (...) { /* one bad chunk shouldn't drop the rest */ }
+        });
 
         // Sequential merge, in db_paths order, so output is identical
         // regardless of worker count or chunking.

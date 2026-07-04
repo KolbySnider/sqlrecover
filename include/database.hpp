@@ -2,13 +2,13 @@
 /// @file
 /// @brief Holds the db file's bytes and hands out pointers to pages.
 
-#include <vector>
 #include <string>
 #include "page.hpp"
+#include "mapped_file.hpp"
 
 namespace sqlrecover {
 
-/// @brief Owns the bytes of a SQLite database file in memory.
+/// @brief Memory-maps a SQLite database file and hands out page pointers.
 class Database {
 public:
     /// @brief Read a SQLite database file and parse its header.
@@ -43,15 +43,11 @@ public:
     /// @return page_size() - reserved_per_page.
     uint32_t usable_size() const { return hdr_.page_size - hdr_.reserved_per_page; }
 
-    /// @brief Whole-file byte buffer.
-    /// @return Reference to the owning vector.
-    const std::vector<uint8_t>& bytes() const { return data_; }
-
 private:
     Database() = default;
-    std::string          path_;
-    std::vector<uint8_t> data_;
-    DbHeader             hdr_;
+    std::string path_;
+    MappedFile  file_;
+    DbHeader    hdr_;
 };
 
 } // namespace sqlrecover

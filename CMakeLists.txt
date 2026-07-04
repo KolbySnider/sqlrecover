@@ -17,6 +17,7 @@ add_executable(sqlrecover
     src/varint.cpp
     src/serial.cpp
     src/page.cpp
+    src/mapped_file.cpp
     src/database.cpp
     src/btree.cpp
     src/schema.cpp

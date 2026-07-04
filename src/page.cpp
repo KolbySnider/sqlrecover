@@ -14,14 +14,14 @@ const char* to_string(Origin o) {
     return "unknown";
 }
 
-DbHeader parse_db_header(const std::vector<uint8_t>& db) {
+DbHeader parse_db_header(const uint8_t* data, size_t size) {
     DbHeader h;
-    if (db.size() < 100) return h;
+    if (size < 100) return h;
     static const char magic[16] = {'S','Q','L','i','t','e',' ','f',
                                    'o','r','m','a','t',' ','3','\0'}; // HAS to be EXACT
-    if (std::memcmp(db.data(), magic, 16) != 0) return h;
+    if (std::memcmp(data, magic, 16) != 0) return h;
 
-    ByteReader r(db.data(), db.size(), 16);
+    ByteReader r(data, size, 16);
     uint16_t ps = r.u16();
     h.page_size = (ps == 1) ? 65536u : ps;
     // If page_size is bogus, fall back to 4096 (Android default, and the
@@ -49,7 +49,7 @@ DbHeader parse_db_header(const std::vector<uint8_t>& db) {
 
     // Sanity-bound the freelist so a corrupt count doesn't make
     // recover_freelist walk into nonsense pages.
-    uint32_t max_pages = static_cast<uint32_t>(db.size() / h.page_size);
+    uint32_t max_pages = static_cast<uint32_t>(size / h.page_size);
     if (h.freelist_trunk > max_pages) h.freelist_trunk = 0;
     if (h.freelist_count > max_pages) h.freelist_count = 0;
 

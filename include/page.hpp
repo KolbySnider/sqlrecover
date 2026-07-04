@@ -4,7 +4,7 @@
 /// headers.
 
 #include <cstdint>
-#include <vector>
+#include <cstddef>
 #include "types.hpp"
 #include "serial.hpp"
 
@@ -43,10 +43,11 @@ struct PageHeader {
 
 /// @brief Parse the 100-byte db header.
 /// Magic "SQLite format 3\0" must match.
-/// @param db Whole-file bytes (only the first 100 are inspected).
+/// @param data Whole-file bytes (only the first 100 are inspected).
+/// @param size Bytes available at data.
 /// @return Parsed header. The valid field is false if anything looked
 ///         wrong; other fields are then undefined.
-DbHeader parse_db_header(const std::vector<uint8_t>& db);
+DbHeader parse_db_header(const uint8_t* data, size_t size);
 
 /// @brief Parse a B-tree page header. Page 1 has the 100-byte db header
 /// sitting in front of its B-tree header, which this function accounts

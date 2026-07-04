@@ -82,6 +82,13 @@ std::vector<Hit> scan_range(const std::string& image_path, uint64_t start, uint6
         if (avail == 0) break;
 
         for (size_t i = 0; i + 100 <= avail; ) {
+            // Jump to the next occurrence of the magic's first byte
+            // instead of checking every position - memchr is typically
+            // SIMD-optimized, unlike a hand-rolled byte-by-byte loop.
+            const void* found = std::memchr(buf.data() + i, magic[0], avail - 99 - i);
+            if (!found) break;
+            i = static_cast<const uint8_t*>(found) - buf.data();
+
             uint64_t hit_pos = buf0_file_pos + i;
             if (hit_pos >= end) break; // rest belongs to the next range
 

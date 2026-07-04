@@ -352,23 +352,32 @@ std::vector<RawHit> scan_file_range(const std::string& image_path, uint64_t star
         size_t avail = carry + got;
         if (avail == 0) break;
 
-        for (size_t i = 0; i + overlap <= avail; ) {
-            uint64_t window_pos = buf0_file_pos + i;
-            if (window_pos >= end) break;
+        // One memchr-based pass per signature rather than checking all 8
+        // at every byte - each has its own anchor byte and offset, so a
+        // single shared scan can't jump on all of them at once. Hits come
+        // out grouped by signature instead of position, but carve_files
+        // sorts everything by offset afterward anyway.
+        for (size_t s = 0; s < sigs.size(); ++s) {
+            const Signature& sig = sigs[s];
+            size_t moff_base = size_t(sig.magic_offset);
+            size_t mlen = sig.magic.size();
+            uint8_t anchor = sig.magic[0];
 
-            bool matched = false;
-            for (size_t s = 0; s < sigs.size() && !matched; ++s) {
-                const Signature& sig = sigs[s];
-                size_t moff = i + size_t(sig.magic_offset);
-                if (moff + sig.magic.size() > avail) continue;
-                if (std::memcmp(buf.data() + moff, sig.magic.data(), sig.magic.size()) != 0)
-                    continue;
-                uint64_t file_start = window_pos; // window_pos already anchors true file start
-                if (file_start % 512 != 0) continue;
-                hits.push_back({file_start, s});
-                matched = true;
+            for (size_t i = 0; i + moff_base + mlen <= avail; ) {
+                size_t search_len = avail - mlen - moff_base - i + 1;
+                const void* found = std::memchr(buf.data() + i + moff_base, anchor, search_len);
+                if (!found) break;
+                i = static_cast<const uint8_t*>(found) - buf.data() - moff_base;
+
+                uint64_t window_pos = buf0_file_pos + i;
+                if (window_pos >= end) break;
+
+                if (std::memcmp(buf.data() + i + moff_base, sig.magic.data(), mlen) != 0) { ++i; continue; }
+                if (window_pos % 512 != 0) { ++i; continue; }
+
+                hits.push_back({window_pos, s});
+                i += 512;
             }
-            i += matched ? 512 : 1;
         }
 
         if (got == 0) break;

@@ -19,7 +19,7 @@ namespace {
 /// @return true if the row passes the minimum bar, false otherwise.
 bool plausible(const std::vector<Value>& vals, bool& suspect) {
     if (vals.empty()) return false;
-    if (vals.size() > 512) return false;
+    if (vals.size() > 64) return false;
     suspect = vals.size() <= 1;
     return true;
 }

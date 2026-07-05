@@ -22,6 +22,12 @@ Every recovered record carries full provenance: source file, origin, page
 number, byte offset, and (for WAL hits) the frame index. In forensic work, where
 a byte came from matters as much as the byte itself.
 
+With `--image`, the input can be a raw partition image instead of a single
+`.db` file: `sqlrecover` carves every SQLite database out of it by signature
+first, then runs the normal pipeline on each. Adding `--carve-files` also
+carves plain deleted files (JPEG, PNG, GIF, BMP, PDF, MP4/MOV, WAV) out of the
+same image by their file-type signatures.
+
 ## Known-artifact recognition
 
 Records recovered from slack space or the WAL come back as anonymous arrays of
@@ -44,11 +50,14 @@ with named columns:
 }
 ```
 
-The catalog currently covers Android SMS (`android_sms`), call log
-(`android_calllog`), and a common contact projection (`android_contact`).
-Matching tolerates NULL columns, which are routine on Android, and requires at
-least two type-constrained columns to agree before it labels anything, so it
-won't tag noise. Adding a new artifact takes a few lines in `src/artifact.cpp`.
+The catalog currently covers SMS (`android_sms`, plus the GMS-messaging
+variant `android_sms_gms`), MMS (`android_mms`), call log (`android_calllog`),
+contacts (`android_contact`), browser history (`android_browser_history`),
+MediaStore images (`android_media_images`), and WhatsApp messages
+(`android_whatsapp_message`). Matching tolerates NULL columns, which are
+routine on Android, and requires at least two type-constrained columns to
+agree before it labels anything, so it won't tag noise. Adding a new artifact
+takes a few lines in `src/artifact.cpp`.
 
 ### Field decoding
 
@@ -99,7 +108,7 @@ collapsed, keeping the live copy. Timestamps are UTC; see the note below.
 
 ## Building
 
-Requires a C++17 compiler and CMake 3.16+.
+Requires a C++20 compiler and CMake 3.16+.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -114,14 +123,18 @@ dependencies.
 ```
 sqlrecover <input.db> [options]
 
-  --image              treat input as a raw partition image; carve .db files out
+  --image              treat input as a raw partition image; carve .db files
+                       out of it by signature
+  --carve-files        also carve generic files (jpeg/png/gif/bmp/pdf/mp4/wav)
+                       out of the image by signature; only with --image
   --wal <path>         explicit -wal file (default: <input>-wal if present)
   --output <dir>       output directory (default: ./out)
-  --format json|csv    output format (default: json)
+  --format json|jsonl|csv  output format for records (default: json)
   --live               include live records too (default: deleted only)
   --table <name>       restrict output to records labelled <name>
   --report             also write a human-readable report
   --timeline           build a unified chronological timeline (timeline.txt/json)
+  -j, --jobs N         worker threads (default: one per CPU core)
   -v, --verbose        per-stage progress on stderr
   -h, --help           show help
 ```
@@ -173,7 +186,7 @@ lost and the output never corrupts.
 ## Project layout
 
 ```
-include/sqlrecover/   public headers, one per module
+include/              public headers, one per module
 src/                  implementations + main.cpp (CLI orchestration)
 third_party/json.hpp  vendored nlohmann/json
 tests/                ground-truth corpus generator + smoke test

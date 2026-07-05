@@ -18,7 +18,7 @@ DbHeader parse_db_header(const uint8_t* data, size_t size) {
     DbHeader h;
     if (size < 100) return h;
     static const char magic[16] = {'S','Q','L','i','t','e',' ','f',
-                                   'o','r','m','a','t',' ','3','\0'}; // HAS to be EXACT
+                                   'o','r','m','a','t',' ','3','\0'}; // must match exactly
     if (std::memcmp(data, magic, 16) != 0) return h;
 
     ByteReader r(data, size, 16);

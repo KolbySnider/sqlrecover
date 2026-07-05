@@ -55,29 +55,29 @@ const std::vector<Artifact>& artifact_catalog() {
             "android_sms_gms",
             "Android SMS via Google Mobile Services (Message table, 21 cols)",
             {
-                    {"_id",            ColClass::Any},
-                    {"action",         ColClass::TextLike},   // "add" / "del"
-                    {"uri",            ColClass::TextLike},   // content://sms/<id>
-                    {"unknown1",       ColClass::Any},
-                    {"date",           ColClass::IntLike, Interp::EpochSeconds},
-                    {"date_inserted",  ColClass::IntLike, Interp::EpochMillis},
-                    {"payload",        ColClass::Any},         // protobuf blob
-                    {"unknown2",       ColClass::Any},
-                    {"unknown3",       ColClass::Any},
-                    {"body",           ColClass::TextLike},
-                    {"unknown4",       ColClass::Any},
-                    {"unknown5",       ColClass::Any},
-                    {"unknown6",       ColClass::Any},
-                    {"unknown7",       ColClass::Any},
-                    {"unknown8",       ColClass::Any},
-                    {"sender_addr",    ColClass::IntLike},     // E.164 as int? weird
-                    {"recipient_addr", ColClass::IntLike},
-                    {"thread_id",      ColClass::IntLike},
-                    {"date_received",  ColClass::IntLike, Interp::EpochMillis},
-                    {"unknown9",       ColClass::Any},
-                    {"label",          ColClass::TextLike},    // "read" / "unread"
-                },
+                {"_id",            ColClass::Any},
+                {"action",         ColClass::TextLike},   // "add" / "del"
+                {"uri",            ColClass::TextLike},   // content://sms/<id>
+                {"unknown1",       ColClass::Any},
+                {"date",           ColClass::IntLike, Interp::EpochSeconds},
+                {"date_inserted",  ColClass::IntLike, Interp::EpochMillis},
+                {"payload",        ColClass::Any},        // protobuf blob
+                {"unknown2",       ColClass::Any},
+                {"unknown3",       ColClass::Any},
+                {"body",           ColClass::TextLike},
+                {"unknown4",       ColClass::Any},
+                {"unknown5",       ColClass::Any},
+                {"unknown6",       ColClass::Any},
+                {"unknown7",       ColClass::Any},
+                {"unknown8",       ColClass::Any},
+                {"sender_addr",    ColClass::IntLike},    // E.164 stored as int
+                {"recipient_addr", ColClass::IntLike},
+                {"thread_id",      ColClass::IntLike},
+                {"date_received",  ColClass::IntLike, Interp::EpochMillis},
+                {"unknown9",       ColClass::Any},
+                {"label",          ColClass::TextLike},   // "read" / "unread"
             },
+        },
         {
             "android_mms",
             "Android MMS message (mms table, metadata only - body text lives "
@@ -423,7 +423,7 @@ bool decode_value(const Value& v, Interp interp, std::string& out) {
             int64_t h = s / 3600; s %= 3600;
             int64_t m = s / 60;   s %= 60;
             char buf[32];
-            if (h > 0) std::snprintf(buf, sizeof(buf), "%lldh%02lldm%02llds", // sure
+            if (h > 0) std::snprintf(buf, sizeof(buf), "%lldh%02lldm%02llds",
                                      (long long)h, (long long)m, (long long)s);
             else if (m > 0) std::snprintf(buf, sizeof(buf), "%lldm%02llds",
                                      (long long)m, (long long)s);

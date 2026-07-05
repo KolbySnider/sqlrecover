@@ -25,7 +25,10 @@ public:
     MappedFile(const MappedFile&) = delete;
     MappedFile& operator=(const MappedFile&) = delete;
 
+    /// @brief Pointer to the first mapped byte, or nullptr for an empty file.
     const uint8_t* data() const { return data_; }
+
+    /// @brief Size of the mapped file in bytes.
     size_t size() const { return size_; }
 
 private:

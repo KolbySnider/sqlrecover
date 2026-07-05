@@ -70,7 +70,7 @@ WalStats recover_wal(const Database& db, const std::string& wal_path,
                      const std::function<void(Record&&)>& sink) {
     WalStats st;
     std::vector<uint8_t> wal;
-    try { wal = read_file(wal_path); } catch (...) { return st; } // 1 liner why not
+    try { wal = read_file(wal_path); } catch (...) { return st; } // no -wal file, nothing to do
     if (wal.size() < 32) return st;
 
     // WAL header is 32 bytes. Magic 0x377f0682 (LE host) / 0x377f0683 (BE).

@@ -92,14 +92,14 @@ std::vector<TimelineEvent> build_timeline(const std::vector<Record>& records) {
         std::vector<Interp> interps = artifact_interps(r.artifact);
 
         TimelineEvent ev;
-        ev.epoch_ms  = epoch_ms;
-        ev.iso_utc   = iso;
-        ev.artifact  = r.artifact;
-        ev.summary      = make_summary(r, tl, interps, true);
-        ev.summary_full = make_summary(r, tl, interps, false);
-        ev.origin    = r.prov.origin;
-        ev.recovered = (r.prov.origin != Origin::Live);
-        ev.prov      = r.prov;
+        ev.epoch_ms      = epoch_ms;
+        ev.iso_utc       = iso;
+        ev.artifact      = r.artifact;
+        ev.summary       = make_summary(r, tl, interps, true);
+        ev.summary_full  = make_summary(r, tl, interps, false);
+        ev.origin        = r.prov.origin;
+        ev.recovered     = (r.prov.origin != Origin::Live);
+        ev.prov          = r.prov;
         events.push_back(std::move(ev));
     }
 
@@ -150,9 +150,9 @@ void write_timeline_json(std::ostream& os, const std::vector<TimelineEvent>& tl)
     json arr = json::array();
     for (const auto& ev : tl) {
         json j;
-        j["time_utc"]  = ev.iso_utc;
-        j["epoch_ms"]  = ev.epoch_ms;
-        j["artifact"]  = ev.artifact;
+        j["time_utc"]     = ev.iso_utc;
+        j["epoch_ms"]     = ev.epoch_ms;
+        j["artifact"]     = ev.artifact;
         j["summary"]      = ev.summary;
         j["summary_full"] = ev.summary_full;
         j["recovered"]    = ev.recovered;

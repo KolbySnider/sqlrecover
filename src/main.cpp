@@ -20,6 +20,7 @@
 #include <thread>
 #include <mutex>
 #include <optional>
+#include <functional>
 
 using namespace sqlrecover;
 namespace fs = std::filesystem;
@@ -69,6 +70,8 @@ struct Args {
     bool carve_files = false;
     unsigned    jobs = 0; ///< 0 = auto (hardware_concurrency)
 };
+
+using LogFn = std::function<void(const std::string&)>;
 
 /// @brief Print an argument error and exit with code 2.
 /// @param msg Error message.
@@ -195,12 +198,252 @@ struct SlackTask {
     uint32_t pg_start, pg_end;
 };
 
+/// @brief Phase 1 for a single database: open it, read its schema, walk
+/// the live B-tree, and pull freelist + WAL residual rows. Failure is
+/// caught and stored on the outcome rather than propagated, so one
+/// malformed candidate can't take the rest of the batch down with it.
+/// @param db_path Path to the candidate database file.
+/// @param args Run configuration (WAL override, --image mode).
+/// @param log Verbose-mode progress logger.
+/// @return Populated outcome; failed is set and error explains why if
+///         anything went wrong.
+DbOutcome process_db(const std::string& db_path, const Args& args, const LogFn& log) {
+    DbOutcome res;
+    try {
+        log("opening " + db_path);
+        Database db = Database::open(db_path);
+
+        // Pick a WAL: explicit flag (only really makes sense for a single
+        // db), else the sidecar next to this db.
+        std::string wal_path = (!args.image && !args.wal.empty())
+                             ? args.wal : std::string();
+        if (wal_path.empty()) {
+            std::string guess = db_path + "-wal";
+            if (fs::exists(guess)) wal_path = guess;
+        }
+
+        log("page size " + std::to_string(db.page_size()) +
+            ", pages " + std::to_string(db.page_count()));
+
+        res.tables = read_schema(db);
+        log("schema: " + std::to_string(res.tables.size()) + " tables");
+
+        res.visited.assign(db.page_count() + 2, false);
+
+        // Live records also mark visited pages, so slack scanning
+        // (phase 2) knows which pages are orphans.
+        for (const auto& t : res.tables) {
+            const std::vector<std::string>& cols = t.columns;
+            walk_table_btree(db, t.root_page, t.name, res.visited,
+                             [&](Record&& r) {
+                                 if (cols.size() == r.values.size())
+                                     r.column_names = cols;
+                                 res.live.push_back(std::move(r));
+                             });
+        }
+        log("live records: " + std::to_string(res.live.size()));
+
+        size_t before = res.residual.size();
+        recover_freelist(db, res.visited,
+                         [&](Record&& r){ res.residual.push_back(std::move(r)); });
+        res.freelist_n = res.residual.size() - before;
+        log("freelist records: " + std::to_string(res.freelist_n));
+
+        before = res.residual.size();
+        if (!wal_path.empty())
+            recover_wal(db, wal_path,
+                        [&](Record&& r){ res.residual.push_back(std::move(r)); });
+        res.wal_n = res.residual.size() - before;
+        log("wal records: " + std::to_string(res.wal_n));
+
+        res.wal_file = wal_path;
+        res.page_size = db.page_size();
+        res.page_count = db.page_count();
+        res.db = std::move(db); // kept alive for phase 2
+    } catch (const std::exception& e) {
+        res.failed = true;
+        res.error = e.what();
+    }
+    return res;
+}
+
+/// @brief Phase 2: chunk every surviving db's page range by byte size and
+/// scan all chunks, across all dbs, on one shared thread pool - not one
+/// task per db like phase 1. This is what removes the old ceiling where a
+/// single huge or corrupt db sat on one core no matter how many workers
+/// were free. Chunk results are merged back into each db's residual list
+/// in db order afterward, so output doesn't depend on chunk size or
+/// worker count.
+/// @param[in,out] results Phase-1 outcomes; residual and slack_n are
+///                        extended in place. Failed entries are skipped.
+/// @param want_jobs Worker threads to use for the scan.
+void run_slack_scan(std::vector<DbOutcome>& results, unsigned want_jobs) {
+    constexpr uint64_t kBytesPerChunk = 16ull * 1024 * 1024;
+    std::vector<SlackTask> slack_tasks;
+    std::vector<size_t> slack_begin(results.size()), slack_count(results.size());
+    for (size_t i = 0; i < results.size(); ++i) {
+        slack_begin[i] = slack_tasks.size();
+        if (results[i].failed) continue;
+        uint32_t psize = results[i].page_size ? results[i].page_size : 4096;
+        uint32_t chunk = std::max<uint32_t>(1, uint32_t(kBytesPerChunk / psize));
+        uint32_t pages = results[i].page_count;
+        for (uint32_t pg = 1; pg <= pages; pg += chunk)
+            slack_tasks.push_back({i, pg, std::min(pages + 1, pg + chunk)});
+        slack_count[i] = slack_tasks.size() - slack_begin[i];
+    }
+
+    std::vector<std::vector<Record>> chunk_results(slack_tasks.size());
+    unsigned worker_count = static_cast<unsigned>(
+        std::min<size_t>(want_jobs, std::max<size_t>(1, slack_tasks.size())));
+
+    parallel_for(slack_tasks.size(), worker_count, [&](size_t j) {
+        const SlackTask& t = slack_tasks[j];
+        DbOutcome& res = results[t.db_index];
+        try {
+            recover_slack_range(*res.db, res.visited, t.pg_start, t.pg_end,
+                                [&](Record&& r){ chunk_results[j].push_back(std::move(r)); });
+        } catch (...) { /* one bad chunk shouldn't drop the rest */ }
+    });
+
+    // Sequential merge, in db_paths order, so the merged output is
+    // identical regardless of worker count or chunking.
+    for (size_t i = 0; i < results.size(); ++i) {
+        DbOutcome& res = results[i];
+        size_t before = res.residual.size();
+        for (size_t j = slack_begin[i]; j < slack_begin[i] + slack_count[i]; ++j)
+            res.residual.insert(res.residual.end(),
+                                chunk_results[j].begin(), chunk_results[j].end());
+        res.slack_n = res.residual.size() - before;
+    }
+}
+
+/// @brief Label and fold every db's records into the aggregated output
+/// set and summary counts. Skips (and warns about) any db that failed in
+/// phase 1.
+/// @param results Per-db outcomes from phases 1 and 2.
+/// @param db_paths Parallel to results, for the skip warning message.
+/// @param args Run configuration (--live, --timeline).
+/// @param log Verbose-mode progress logger.
+/// @param[out] out Aggregated records for the main output dump.
+/// @param[out] tl_records Aggregated records for --timeline, live and
+///                        recovered mixed, regardless of --live.
+/// @param[out] sum Running totals; input_file must already be set.
+void aggregate_results(std::vector<DbOutcome>& results,
+                       const std::vector<std::string>& db_paths,
+                       const Args& args, const LogFn& log,
+                       std::vector<Record>& out, std::vector<Record>& tl_records,
+                       RunSummary& sum) {
+    for (size_t i = 0; i < results.size(); ++i) {
+        DbOutcome& res = results[i];
+        if (res.failed) {
+            std::cerr << "warning: skipping " << db_paths[i]
+                      << " (" << res.error << ")\n";
+            ++sum.failed;
+            continue;
+        }
+        log("slack records: " + std::to_string(res.slack_n));
+
+        label_records(res.residual, res.tables);
+        label_records(res.live, res.tables);
+
+        // Timeline always pulls from both live and recovered, no matter
+        // what --live is set to for the main dump
+        if (args.timeline) {
+            tl_records.insert(tl_records.end(), res.live.begin(), res.live.end());
+            tl_records.insert(tl_records.end(), res.residual.begin(), res.residual.end());
+        }
+
+        if (args.live) out.insert(out.end(), res.live.begin(), res.live.end());
+        out.insert(out.end(), res.residual.begin(), res.residual.end());
+
+        // page_size/page_count just reflect the last db when there's
+        // more than one; the per-origin counts sum across all of them
+        if (!res.wal_file.empty() && sum.wal_file.empty()) sum.wal_file = res.wal_file;
+        sum.page_size = res.page_size;
+        sum.page_count = res.page_count;
+        sum.live += args.live ? res.live.size() : 0;
+        sum.freelist += res.freelist_n;
+        sum.slack += res.slack_n;
+        sum.wal_prior += res.wal_n;
+    }
+}
+
+/// @brief Apply the optional --table filter and write every requested
+/// output artifact: the main record dump, and (opt-in) the report,
+/// carved-files manifest, and timeline.
+/// @param args Run configuration.
+/// @param[in,out] out Aggregated records; filtered by --table in place.
+/// @param[in,out] sum Running totals; suspect/artifact/file counts are
+///                    filled in here from the final record set.
+/// @param recovered_files Files carved by --carve-files, if any.
+/// @param tl_records Records to build the --timeline from, if requested.
+/// @param want_jobs Worker threads for output formatting.
+void write_outputs(const Args& args, std::vector<Record>& out, RunSummary& sum,
+                   const std::vector<RecoveredFile>& recovered_files,
+                   const std::vector<Record>& tl_records, unsigned want_jobs) {
+    if (!args.table.empty()) {
+        std::vector<Record> filt;
+        for (auto& r : out)
+            if (r.table.rfind(args.table, 0) == 0) filt.push_back(std::move(r));
+        out.swap(filt);
+    }
+    for (const auto& r : out) {
+        if (r.suspect) ++sum.suspect;
+        if (!r.artifact.empty()) ++sum.artifacts;
+    }
+    sum.files_recovered = recovered_files.size();
+    for (const auto& f : recovered_files) ++sum.files_by_type[f.kind];
+
+    fs::create_directories(args.output);
+    std::string ext = ".csv";
+    if (args.format == "json")        ext = ".json";
+    else if (args.format == "jsonl")  ext = ".jsonl";
+    std::string rec_path = (fs::path(args.output) / ("records" + ext)).string();
+    std::ofstream rf(rec_path, std::ios::binary);
+    if (!rf) throw ParseError("cannot write output: " + rec_path);
+    if (args.format == "json")        write_json(rf, out, want_jobs);
+    else if (args.format == "jsonl")  write_jsonl(rf, out, want_jobs);
+    else                              write_csv(rf, out, want_jobs);
+    rf.close();
+
+    if (args.report) {
+        std::string rep_path = (fs::path(args.output) / "report.txt").string();
+        std::ofstream repf(rep_path, std::ios::binary);
+        if (repf) write_report(repf, sum);
+        write_report(std::cerr, sum);
+    }
+
+    if (args.carve_files) {
+        std::string manifest_path = (fs::path(args.output) / "recovered_files.json").string();
+        std::ofstream mf(manifest_path, std::ios::binary);
+        if (mf) write_recovered_files_json(mf, recovered_files);
+        std::cerr << "[+] wrote " << recovered_files.size()
+                  << " recovered file(s) to " << manifest_path << "\n";
+    }
+
+    if (args.timeline) {
+        std::vector<TimelineEvent> tl = build_timeline(tl_records);
+        std::string tl_txt = (fs::path(args.output) / "timeline.txt").string();
+        std::string tl_json = (fs::path(args.output) / "timeline.json").string();
+        std::ofstream tf(tl_txt, std::ios::binary);
+        if (tf) write_timeline_text(tf, tl);
+        std::ofstream tj(tl_json, std::ios::binary);
+        if (tj) write_timeline_json(tj, tl);
+        size_t recovered = 0;
+        for (const auto& e : tl) if (e.recovered) ++recovered;
+        std::cerr << "[+] timeline: " << tl.size() << " events ("
+                  << recovered << " recovered) -> " << tl_txt << "\n";
+    }
+
+    std::cerr << "[+] wrote " << out.size() << " records to " << rec_path << "\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     Args args = parse_args(argc, argv);
     std::mutex log_mutex;
-    auto log = [&](const std::string& m) {
+    LogFn log = [&](const std::string& m) {
         if (!args.verbose) return;
         std::lock_guard<std::mutex> lk(log_mutex);
         std::cerr << "[*] " << m << "\n";
@@ -235,214 +478,30 @@ int main(int argc, char** argv) {
             db_paths.push_back(args.input);
         }
 
-        std::vector<Record> out;          // aggregated across all dbs
-        std::vector<Record> tl_records;   // everything labelled, for the timeline
         RunSummary sum;
         sum.input_file = args.input;
 
-        // Phase 1: open each db, do schema/live-walk/freelist/WAL. One
+        // Phase 1: open each db and recover schema/live/freelist/WAL. One
         // worker per db here - cheap relative to slack scanning, and
         // scales with live row count rather than page count.
         std::vector<DbOutcome> results(db_paths.size());
-
         unsigned worker_count = static_cast<unsigned>(
             std::min<size_t>(want_jobs, db_paths.size()));
         if (worker_count == 0) worker_count = 1;
         log("using " + std::to_string(worker_count) + " worker thread(s)");
 
         parallel_for(db_paths.size(), worker_count, [&](size_t i) {
-            const std::string& db_path = db_paths[i];
-            DbOutcome& res = results[i];
-
-            // One malformed candidate shouldn't cost every other
-            // database's results, so failures are isolated per-db.
-            try {
-                log("opening " + db_path);
-                Database db = Database::open(db_path);
-
-                // Pick a WAL: explicit flag (only really makes sense
-                // for a single db), else the sidecar next to this db.
-                std::string wal_path = (!args.image && !args.wal.empty())
-                                     ? args.wal : std::string();
-                if (wal_path.empty()) {
-                    std::string guess = db_path + "-wal";
-                    if (fs::exists(guess)) wal_path = guess;
-                }
-
-                log("page size " + std::to_string(db.page_size()) +
-                    ", pages " + std::to_string(db.page_count()));
-
-                res.tables = read_schema(db);
-                log("schema: " + std::to_string(res.tables.size()) + " tables");
-
-                res.visited.assign(db.page_count() + 2, false);
-
-                // Live records also mark visited pages, so slack
-                // scanning (phase 2) knows which pages are orphans.
-                for (const auto& t : res.tables) {
-                    const std::vector<std::string>& cols = t.columns;
-                    walk_table_btree(db, t.root_page, t.name, res.visited,
-                                     [&](Record&& r) {
-                                         if (cols.size() == r.values.size())
-                                             r.column_names = cols;
-                                         res.live.push_back(std::move(r));
-                                     });
-                }
-                log("live records: " + std::to_string(res.live.size()));
-
-                size_t before = res.residual.size();
-                recover_freelist(db, res.visited,
-                                 [&](Record&& r){ res.residual.push_back(std::move(r)); });
-                res.freelist_n = res.residual.size() - before;
-                log("freelist records: " + std::to_string(res.freelist_n));
-
-                before = res.residual.size();
-                if (!wal_path.empty())
-                    recover_wal(db, wal_path,
-                                [&](Record&& r){ res.residual.push_back(std::move(r)); });
-                res.wal_n = res.residual.size() - before;
-                log("wal records: " + std::to_string(res.wal_n));
-
-                res.wal_file = wal_path;
-                res.page_size = db.page_size();
-                res.page_count = db.page_count();
-                res.db = std::move(db); // kept alive for phase 2
-            } catch (const std::exception& e) {
-                res.failed = true;
-                res.error = e.what();
-            }
+            results[i] = process_db(db_paths[i], args, log);
         });
 
-        // Phase 2: slack scan, chunked by page range across *all* dbs at
-        // once - not one task per db like phase 1. This is the fix for
-        // the old ceiling where a single huge/corrupt db sat on one core
-        // no matter how many workers were free.
-        constexpr uint64_t kBytesPerChunk = 16ull * 1024 * 1024;
-        std::vector<SlackTask> slack_tasks;
-        std::vector<size_t> slack_begin(results.size()), slack_count(results.size());
-        for (size_t i = 0; i < results.size(); ++i) {
-            slack_begin[i] = slack_tasks.size();
-            if (results[i].failed) continue;
-            uint32_t psize = results[i].page_size ? results[i].page_size : 4096;
-            uint32_t chunk = std::max<uint32_t>(1, uint32_t(kBytesPerChunk / psize));
-            uint32_t pages = results[i].page_count;
-            for (uint32_t pg = 1; pg <= pages; pg += chunk)
-                slack_tasks.push_back({i, pg, std::min(pages + 1, pg + chunk)});
-            slack_count[i] = slack_tasks.size() - slack_begin[i];
-        }
+        // Phase 2: slack scan, chunked by page range across all dbs at once.
+        run_slack_scan(results, want_jobs);
 
-        std::vector<std::vector<Record>> chunk_results(slack_tasks.size());
-        unsigned worker_count2 = static_cast<unsigned>(
-            std::min<size_t>(want_jobs, std::max<size_t>(1, slack_tasks.size())));
+        std::vector<Record> out;        // aggregated across all dbs
+        std::vector<Record> tl_records; // everything labelled, for the timeline
+        aggregate_results(results, db_paths, args, log, out, tl_records, sum);
 
-        parallel_for(slack_tasks.size(), worker_count2, [&](size_t j) {
-            const SlackTask& t = slack_tasks[j];
-            DbOutcome& res = results[t.db_index];
-            try {
-                recover_slack_range(*res.db, res.visited, t.pg_start, t.pg_end,
-                                    [&](Record&& r){ chunk_results[j].push_back(std::move(r)); });
-            } catch (...) { /* one bad chunk shouldn't drop the rest */ }
-        });
-
-        // Sequential merge, in db_paths order, so output is identical
-        // regardless of worker count or chunking.
-        for (size_t i = 0; i < results.size(); ++i) {
-            DbOutcome& res = results[i];
-            if (res.failed) {
-                std::cerr << "warning: skipping " << db_paths[i]
-                          << " (" << res.error << ")\n";
-                ++sum.failed;
-                continue;
-            }
-
-            size_t before = res.residual.size();
-            for (size_t j = slack_begin[i]; j < slack_begin[i] + slack_count[i]; ++j)
-                res.residual.insert(res.residual.end(),
-                                    chunk_results[j].begin(), chunk_results[j].end());
-            res.slack_n = res.residual.size() - before;
-            log("slack records: " + std::to_string(res.slack_n));
-
-            label_records(res.residual, res.tables);
-            label_records(res.live, res.tables);
-
-            // Timeline always pulls from both live and recovered, no matter
-            // what --live is set to for the main dump
-            if (args.timeline) {
-                tl_records.insert(tl_records.end(), res.live.begin(), res.live.end());
-                tl_records.insert(tl_records.end(), res.residual.begin(), res.residual.end());
-            }
-
-            if (args.live) out.insert(out.end(), res.live.begin(), res.live.end());
-            out.insert(out.end(), res.residual.begin(), res.residual.end());
-
-            // page_size/page_count just reflect the last db when there's
-            // more than one; the per-origin counts sum across all of them
-            if (!res.wal_file.empty() && sum.wal_file.empty()) sum.wal_file = res.wal_file;
-            sum.page_size = res.page_size;
-            sum.page_count = res.page_count;
-            sum.live += args.live ? res.live.size() : 0;
-            sum.freelist += res.freelist_n;
-            sum.slack += res.slack_n;
-            sum.wal_prior += res.wal_n;
-        }
-
-        // Optional table filter on the aggregated set
-        if (!args.table.empty()) {
-            std::vector<Record> filt;
-            for (auto& r : out)
-                if (r.table.rfind(args.table, 0) == 0) filt.push_back(std::move(r));
-            out.swap(filt);
-        }
-        for (const auto& r : out) {
-            if (r.suspect) ++sum.suspect;
-            if (!r.artifact.empty()) ++sum.artifacts;
-        }
-        sum.files_recovered = recovered_files.size();
-        for (const auto& f : recovered_files) ++sum.files_by_type[f.kind];
-
-        // Write outputs
-        fs::create_directories(args.output);
-        std::string ext = ".csv";
-        if (args.format == "json")        ext = ".json";
-        else if (args.format == "jsonl")  ext = ".jsonl";
-        std::string rec_path = (fs::path(args.output) / ("records" + ext)).string();
-        std::ofstream rf(rec_path, std::ios::binary);
-        if (!rf) throw ParseError("cannot write output: " + rec_path);
-        if (args.format == "json")        write_json(rf, out, want_jobs);
-        else if (args.format == "jsonl")  write_jsonl(rf, out, want_jobs);
-        else                              write_csv(rf, out, want_jobs);
-        rf.close();
-
-        if (args.report) {
-            std::string rep_path = (fs::path(args.output) / "report.txt").string();
-            std::ofstream repf(rep_path, std::ios::binary);
-            if (repf) write_report(repf, sum);
-            write_report(std::cerr, sum);
-        }
-
-        if (args.carve_files) {
-            std::string manifest_path = (fs::path(args.output) / "recovered_files.json").string();
-            std::ofstream mf(manifest_path, std::ios::binary);
-            if (mf) write_recovered_files_json(mf, recovered_files);
-            std::cerr << "[+] wrote " << recovered_files.size()
-                      << " recovered file(s) to " << manifest_path << "\n";
-        }
-
-        if (args.timeline) {
-            std::vector<TimelineEvent> tl = build_timeline(tl_records);
-            std::string tl_txt = (fs::path(args.output) / "timeline.txt").string();
-            std::string tl_json = (fs::path(args.output) / "timeline.json").string();
-            std::ofstream tf(tl_txt, std::ios::binary);
-            if (tf) write_timeline_text(tf, tl);
-            std::ofstream tj(tl_json, std::ios::binary);
-            if (tj) write_timeline_json(tj, tl);
-            size_t recovered = 0;
-            for (const auto& e : tl) if (e.recovered) ++recovered;
-            std::cerr << "[+] timeline: " << tl.size() << " events ("
-                      << recovered << " recovered) -> " << tl_txt << "\n";
-        }
-
-        std::cerr << "[+] wrote " << out.size() << " records to " << rec_path << "\n";
+        write_outputs(args, out, sum, recovered_files, tl_records, want_jobs);
         return 0;
 
     } catch (const ParseError& e) {

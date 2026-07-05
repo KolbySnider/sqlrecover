@@ -1,8 +1,8 @@
 #include "output.hpp"
+#include "parallel.hpp"
 #include "../third_party/json.hpp"
 #include <iomanip>
 #include <sstream>
-#include <thread>
 #include <functional>
 
 using nlohmann::json;
@@ -129,18 +129,13 @@ void write_parallel(std::ostream& os, const std::vector<Record>& records,
     size_t per_chunk = (records.size() + worker_count - 1) / worker_count;
 
     std::vector<std::string> chunks(worker_count);
-    std::vector<std::thread> pool;
-    pool.reserve(worker_count);
-    for (unsigned w = 0; w < worker_count; ++w) {
+    parallel_for(worker_count, worker_count, [&](size_t w) {
         size_t begin = w * per_chunk;
         size_t end = std::min(records.size(), begin + per_chunk);
-        if (begin >= end) continue;
-        pool.emplace_back([&, begin, end, w]() {
-            std::string& buf = chunks[w];
-            for (size_t i = begin; i < end; ++i) format_one(records[i], i, buf);
-        });
-    }
-    for (auto& t : pool) t.join();
+        if (begin >= end) return;
+        std::string& buf = chunks[w];
+        for (size_t i = begin; i < end; ++i) format_one(records[i], i, buf);
+    });
 
     for (const auto& c : chunks) os << c;
 }

@@ -20,30 +20,25 @@ struct ParseError : std::runtime_error {
 };
 
 /// @brief Bounds-checked big-endian reader over a buffer someone else owns.
-/// Don't remember where I found this code.
 class ByteReader {
 public:
-    /// @brief Build a reader over an externally-owned buffer.
-    /// @param data Pointer to the first byte (must outlive the reader).
+    /// @brief Wrap an externally-owned buffer.
+    /// @param data Pointer to the first byte; must outlive the reader.
     /// @param size Size of the buffer in bytes.
-    /// @param pos Starting read position (defaults to 0).
+    /// @param pos Starting read position.
     ByteReader(const uint8_t* data, size_t size, size_t pos = 0)
         : data_(data), size_(size), pos_(pos) {}
 
-    /// @brief Current read position.
-    /// @return Byte offset from the start of the buffer.
+    /// @brief Current byte offset from the start of the buffer.
     size_t pos()  const { return pos_; }
 
-    /// @brief Total buffer size.
-    /// @return Size passed to the constructor.
+    /// @brief Buffer size passed to the constructor.
     size_t size() const { return size_; }
 
-    /// @brief Move the read position.
-    /// @param p New absolute byte offset.
+    /// @brief Jump to an absolute byte offset.
     void   seek(size_t p) { pos_ = p; }
 
-    /// @brief Is the read position at or past the end?
-    /// @return true once pos() >= size().
+    /// @brief True once pos() has reached or passed size().
     bool   eof()  const { return pos_ >= size_; }
 
     /// @brief Throw if fewer than n bytes remain from the current position.
@@ -70,32 +65,23 @@ public:
         return v;
     }
 
-    /// @brief Read a uint8_t and advance.
-    /// @return The byte at the current position.
-    /// @throws ParseError on overrun.
+    /// @brief Read one byte and advance. Throws ParseError on overrun.
     uint8_t  u8()  { return read_be<uint8_t>(); }
 
-    /// @brief Read a big-endian uint16_t and advance.
-    /// @return The decoded value.
-    /// @throws ParseError on overrun.
+    /// @brief Read a big-endian uint16_t and advance. Throws on overrun.
     uint16_t u16() { return read_be<uint16_t>(); }
 
-    /// @brief Read a big-endian 24-bit unsigned and advance.
-    /// @return The decoded value zero-extended to 32 bits.
-    /// @throws ParseError on overrun.
+    /// @brief Read a big-endian 24-bit unsigned, zero-extended to 32 bits,
+    /// and advance. Throws on overrun.
     uint32_t u24() { return read_be<uint32_t, 3>(); }
 
-    /// @brief Read a big-endian uint32_t and advance.
-    /// @return The decoded value.
-    /// @throws ParseError on overrun.
+    /// @brief Read a big-endian uint32_t and advance. Throws on overrun.
     uint32_t u32() { return read_be<uint32_t>(); }
 
-    /// @brief Pointer at the current read position.
-    /// @return data() + pos().
+    /// @brief Pointer at the current read position (data() + pos()).
     const uint8_t* ptr() const { return data_ + pos_; }
 
     /// @brief Pointer to the start of the buffer.
-    /// @return The base pointer passed to the constructor.
     const uint8_t* base() const { return data_; }
 
 private:

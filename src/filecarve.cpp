@@ -1,6 +1,7 @@
 #include "filecarve.hpp"
 #include "util.hpp"
 #include "parallel.hpp"
+#include "chunked_scan.hpp"
 #include <fstream>
 #include <iostream>
 #include <filesystem>
@@ -327,69 +328,48 @@ bool determine_span(std::ifstream& f, uint64_t pos, size_t sig_idx,
     return span_pdf(f, pos, span, confident);
 }
 
-/// @brief Scan one byte range of the image for file-type signatures.
+/// @brief Scan one byte range of the image for file-type signatures. Each
+/// caller (one per worker thread) gets its own stream via scan_chunks,
+/// since ifstream isn't safe to share across threads.
 std::vector<RawHit> scan_file_range(const std::string& image_path, uint64_t start, uint64_t end) {
     const auto& sigs = signature_table();
     size_t max_magic_len = 0;
     for (const auto& s : sigs) max_magic_len = std::max(max_magic_len, s.magic.size() + size_t(s.magic_offset));
-
-    std::ifstream f(image_path, std::ios::binary);
-    if (!f) throw ParseError("cannot open image: " + image_path);
-    f.seekg(static_cast<std::streamoff>(start));
-
-    constexpr size_t CHUNK = 4 * 1024 * 1024;
     size_t overlap = max_magic_len + 8;
 
-    std::vector<uint8_t> buf(CHUNK + overlap);
     std::vector<RawHit> hits;
 
-    uint64_t buf0_file_pos = start;
-    size_t   carry = 0;
+    scan_chunks(image_path, start, end, overlap,
+        [&](const uint8_t* buf, size_t avail, uint64_t buf0_file_pos) {
+            // One memchr-based pass per signature rather than checking all 8
+            // at every byte - each has its own anchor byte and offset, so a
+            // single shared scan can't jump on all of them at once. Hits come
+            // out grouped by signature instead of position, but carve_files
+            // sorts everything by offset afterward anyway.
+            for (size_t s = 0; s < sigs.size(); ++s) {
+                const Signature& sig = sigs[s];
+                size_t moff_base = size_t(sig.magic_offset);
+                size_t mlen = sig.magic.size();
+                uint8_t anchor = sig.magic[0];
 
-    while (buf0_file_pos < end) {
-        f.read(reinterpret_cast<char*>(buf.data() + carry), CHUNK);
-        size_t got = static_cast<size_t>(f.gcount());
-        size_t avail = carry + got;
-        if (avail == 0) break;
+                for (size_t i = 0; i + moff_base + mlen <= avail; ) {
+                    size_t search_len = avail - mlen - moff_base - i + 1;
+                    const void* found = std::memchr(buf + i + moff_base, anchor, search_len);
+                    if (!found) break;
+                    i = static_cast<const uint8_t*>(found) - buf - moff_base;
 
-        // One memchr-based pass per signature rather than checking all 8
-        // at every byte - each has its own anchor byte and offset, so a
-        // single shared scan can't jump on all of them at once. Hits come
-        // out grouped by signature instead of position, but carve_files
-        // sorts everything by offset afterward anyway.
-        for (size_t s = 0; s < sigs.size(); ++s) {
-            const Signature& sig = sigs[s];
-            size_t moff_base = size_t(sig.magic_offset);
-            size_t mlen = sig.magic.size();
-            uint8_t anchor = sig.magic[0];
+                    uint64_t window_pos = buf0_file_pos + i;
+                    if (window_pos >= end) break;
 
-            for (size_t i = 0; i + moff_base + mlen <= avail; ) {
-                size_t search_len = avail - mlen - moff_base - i + 1;
-                const void* found = std::memchr(buf.data() + i + moff_base, anchor, search_len);
-                if (!found) break;
-                i = static_cast<const uint8_t*>(found) - buf.data() - moff_base;
+                    if (std::memcmp(buf + i + moff_base, sig.magic.data(), mlen) != 0) { ++i; continue; }
+                    if (window_pos % 512 != 0) { ++i; continue; }
 
-                uint64_t window_pos = buf0_file_pos + i;
-                if (window_pos >= end) break;
-
-                if (std::memcmp(buf.data() + i + moff_base, sig.magic.data(), mlen) != 0) { ++i; continue; }
-                if (window_pos % 512 != 0) { ++i; continue; }
-
-                hits.push_back({window_pos, s});
-                i += 512;
+                    hits.push_back({window_pos, s});
+                    i += 512;
+                }
             }
-        }
+        });
 
-        if (got == 0) break;
-        if (avail > overlap) {
-            size_t consumed = avail - overlap;
-            buf0_file_pos += consumed;
-            std::memmove(buf.data(), buf.data() + consumed, overlap);
-            carry = overlap;
-        } else {
-            carry = avail;
-        }
-    }
     return hits;
 }
 

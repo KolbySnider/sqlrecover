@@ -1,6 +1,7 @@
 #include "image.hpp"
 #include "util.hpp"
 #include "parallel.hpp"
+#include "chunked_scan.hpp"
 #include <fstream>
 #include <iostream>
 #include <filesystem>
@@ -37,15 +38,15 @@ struct Hit {
 };
 
 /// @brief Scan one byte range of the image for SQLite headers. Each
-/// caller (one per worker thread) gets its own stream, since ifstream
-/// isn't safe to share across threads.
+/// caller (one per worker thread) gets its own stream via scan_chunks,
+/// since ifstream isn't safe to share across threads.
 ///
 /// Notes:
 ///   - buf0_file_pos always tracks the absolute file offset of buf[0], so
 ///     hit_pos = buf0_file_pos + i works regardless of carry state.
 ///   - Hits have to be 512-byte aligned; unaligned ones are embedded
 ///     strings, not real db headers.
-///   - The OVERLAP carry catches a magic that straddles a chunk boundary
+///   - The overlap carry catches a magic that straddles a chunk boundary
 ///     *within* this range; a magic straddling the range/range boundary
 ///     is simply left to whichever range it actually starts in (we bail
 ///     out of the loop the moment hit_pos reaches `end`), so ranges never
@@ -60,87 +61,60 @@ struct Hit {
 std::vector<Hit> scan_range(const std::string& image_path, uint64_t start, uint64_t end) {
     static const char magic[16] = {'S','Q','L','i','t','e',' ','f',
                                    'o','r','m','a','t',' ','3','\0'};
+    constexpr size_t kOverlap = 128; // enough to catch a split header
 
-    std::ifstream f(image_path, std::ios::binary);
-    if (!f) throw ParseError("cannot open image: " + image_path);
-    f.seekg(static_cast<std::streamoff>(start));
-
-    constexpr size_t CHUNK   = 4 * 1024 * 1024;   // 4 MB
-    constexpr size_t OVERLAP = 128;               // enough to catch a split header
-
-    std::vector<uint8_t> buf(CHUNK + OVERLAP);
     std::vector<Hit> hits;
 
-    uint64_t buf0_file_pos = start;
-    size_t   carry         = 0;
+    scan_chunks(image_path, start, end, kOverlap,
+        [&](const uint8_t* buf, size_t avail, uint64_t buf0_file_pos) {
+            for (size_t i = 0; i + 100 <= avail; ) {
+                // Jump to the next occurrence of the magic's first byte
+                // instead of checking every position - memchr is typically
+                // SIMD-optimized, unlike a hand-rolled byte-by-byte loop.
+                const void* found = std::memchr(buf + i, magic[0], avail - 99 - i);
+                if (!found) break;
+                i = static_cast<const uint8_t*>(found) - buf;
 
-    while (buf0_file_pos < end) {
-        f.read(reinterpret_cast<char*>(buf.data() + carry), CHUNK);
-        size_t got   = static_cast<size_t>(f.gcount());
-        size_t avail = carry + got;
+                uint64_t hit_pos = buf0_file_pos + i;
+                if (hit_pos >= end) break; // rest belongs to the next range
 
-        if (avail == 0) break;
+                if (std::memcmp(buf + i, magic, 16) != 0) { ++i; continue; }
 
-        for (size_t i = 0; i + 100 <= avail; ) {
-            // Jump to the next occurrence of the magic's first byte
-            // instead of checking every position - memchr is typically
-            // SIMD-optimized, unlike a hand-rolled byte-by-byte loop.
-            const void* found = std::memchr(buf.data() + i, magic[0], avail - 99 - i);
-            if (!found) break;
-            i = static_cast<const uint8_t*>(found) - buf.data();
+                // Real SQLite dbs start on at least a 512-byte boundary in
+                // a filesystem. Unaligned hits are embedded strings.
+                if (hit_pos % 512 != 0) { ++i; continue; }
 
-            uint64_t hit_pos = buf0_file_pos + i;
-            if (hit_pos >= end) break; // rest belongs to the next range
+                uint32_t ps = header_page_size(buf + i, avail - i);
+                if (ps == 0) { ++i; continue; }
 
-            if (std::memcmp(buf.data() + i, magic, 16) != 0) { ++i; continue; }
+                // Page count from header bytes 28-31 (big-endian)
+                const uint8_t* h = buf + i;
+                uint32_t page_count = (uint32_t(h[28]) << 24) | (uint32_t(h[29]) << 16) |
+                                      (uint32_t(h[30]) << 8)  |  uint32_t(h[31]);
+                uint64_t span = uint64_t(page_count) * ps;
 
-            // Real SQLite dbs start on at least a 512-byte boundary in
-            // a filesystem. Unaligned hits are embedded strings.
-            if (hit_pos % 512 != 0) { ++i; continue; }
+                // Clamp insane or zero spans. This is a low-confidence guess
+                // ("grab up to this much just in case"), not a real size -
+                // the dedup pass below must not treat it as authoritative
+                // coverage, or one corrupt header can blank out every real
+                // database that happens to physically follow it.
+                const uint64_t kCeil = 256ull * 1024 * 1024;
+                bool clamped = (span == 0 || span > kCeil);
+                if (clamped) span = kCeil;
 
-            uint32_t ps = header_page_size(buf.data() + i, avail - i);
-            if (ps == 0) { ++i; continue; }
+                hits.push_back({hit_pos, ps, span, clamped});
 
-            // Page count from header bytes 28-31 (big-endian)
-            const uint8_t* h = buf.data() + i;
-            uint32_t page_count = (uint32_t(h[28]) << 24) | (uint32_t(h[29]) << 16) |
-                                  (uint32_t(h[30]) << 8)  |  uint32_t(h[31]);
-            uint64_t span = uint64_t(page_count) * ps;
-
-            // Clamp insane or zero spans. This is a low-confidence guess
-            // ("grab up to this much just in case"), not a real size -
-            // the dedup pass below must not treat it as authoritative
-            // coverage, or one corrupt header can blank out every real
-            // database that happens to physically follow it.
-            const uint64_t kCeil = 256ull * 1024 * 1024;
-            bool clamped = (span == 0 || span > kCeil);
-            if (clamped) span = kCeil;
-
-            hits.push_back({hit_pos, ps, span, clamped});
-
-            // A real hit can't recur before the next 512-byte-aligned
-            // slot; jump straight there rather than rescanning byte by
-            // byte. Deliberately *not* skipping past the whole `span`
-            // here (an earlier version did, within the current buffer)
-            // - that made results depend on exactly where buffer/chunk
-            // boundaries happened to fall, which shifts under different
-            // worker counts. Overlapping candidates are resolved
-            // deterministically afterward in carve_by_signature instead.
-            i += 512;
-        }
-
-        if (got == 0) break;  // EOF, done
-
-        if (avail > OVERLAP) {
-            size_t consumed  = avail - OVERLAP;
-            buf0_file_pos   += consumed;
-            std::memmove(buf.data(), buf.data() + consumed, OVERLAP);
-            carry = OVERLAP;
-        } else {
-            // Less than OVERLAP total, carry the whole thing
-            carry = avail;
-        }
-    }
+                // A real hit can't recur before the next 512-byte-aligned
+                // slot; jump straight there rather than rescanning byte by
+                // byte. Deliberately *not* skipping past the whole `span`
+                // here (an earlier version did, within the current buffer)
+                // - that made results depend on exactly where buffer/chunk
+                // boundaries happened to fall, which shifts under different
+                // worker counts. Overlapping candidates are resolved
+                // deterministically afterward in carve_by_signature instead.
+                i += 512;
+            }
+        });
 
     return hits;
 }
@@ -156,8 +130,7 @@ std::vector<Hit> scan_range(const std::string& image_path, uint64_t start, uint6
 /// parallel scan (see the position-based dedup pass below), which makes
 /// the result deterministic - the same set of candidates regardless of
 /// worker count - and gives ascending-offset `carved_N.db` numbering,
-/// even though the actual discovery order
-/// across threads isn't otherwise deterministic.
+/// even though discovery order across threads isn't otherwise deterministic.
 ///
 /// @param image_path Path to the raw image.
 /// @param out_dir Output directory for carved .db files.

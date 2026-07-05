@@ -2,15 +2,9 @@
 /// @file
 /// @brief Raw image support. If you've got a dd / .img / .bin of a
 /// partition rather than just the .db file, we'll pull the SQLite
-/// databases out of it first.
-///
-/// Two ways to do that:
-///   1. Filesystem-aware via libtsk (build with -DUSE_TSK=ON). Walks the
-///      FS and pulls files by path. Robust to fragmentation, keeps file
-///      names.
-///   2. Signature carving (always available). Scans for the SQLite
-///      magic and carves contiguous .db files out. No deps, but
-///      fragmented files won't carve cleanly -- that's the tradeoff.
+/// databases out of it first by scanning for the SQLite magic and
+/// carving contiguous .db files out - no filesystem parsing needed, but
+/// a fragmented db won't carve cleanly.
 ///
 /// Carved dbs land in a scratch dir; the normal pipeline then runs on
 /// each.
@@ -20,8 +14,8 @@
 
 namespace sqlrecover {
 
-/// @brief Pull SQLite databases out of a raw image into out_dir. Uses
-/// libtsk when compiled in, otherwise signature carving.
+/// @brief Pull SQLite databases out of a raw image into out_dir via
+/// signature carving.
 /// @param image_path Path to the raw partition image.
 /// @param out_dir Scratch directory for carved .db files (created if
 ///                missing).

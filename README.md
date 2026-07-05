@@ -106,14 +106,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-Optional filesystem-aware image carving via [The Sleuth Kit](https://www.sleuthkit.org/):
-
-```sh
-cmake -S . -B build -DUSE_TSK=ON
-```
-
-Without `USE_TSK`, raw-image support falls back to signature carving, which
-needs no external dependencies.
+Raw-image support (`--image`) uses signature carving and needs no external
+dependencies.
 
 ## Usage
 
@@ -217,8 +211,8 @@ and flags recovered events that match known deletions:
 
 - Table B-trees only; index B-trees are skipped (no row data there).
 - WITHOUT ROWID tables decode as ordinary records (no rowid surfaced).
-- Signature carving recovers contiguous databases; fragmented files need the
-  `USE_TSK` filesystem-aware path.
+- Signature carving recovers contiguous databases; fragmented files won't
+  carve cleanly.
 - This is a learning/portfolio tool, not a validated evidentiary instrument.
   Treat recovered data, especially `suspect` rows, as leads to verify rather
   than proof.

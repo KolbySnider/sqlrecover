@@ -68,9 +68,7 @@ std::vector<Hit> scan_range(const std::string& image_path, uint64_t start, uint6
     scan_chunks(image_path, start, end, kOverlap,
         [&](const uint8_t* buf, size_t avail, uint64_t buf0_file_pos) {
             for (size_t i = 0; i + 100 <= avail; ) {
-                // Jump to the next occurrence of the magic's first byte
-                // instead of checking every position - memchr is typically
-                // SIMD-optimized, unlike a hand-rolled byte-by-byte loop.
+                // Jump to the next occurrence of the magic's first byte.
                 const void* found = std::memchr(buf + i, magic[0], avail - 99 - i);
                 if (!found) break;
                 i = static_cast<const uint8_t*>(found) - buf;
@@ -238,36 +236,11 @@ std::vector<std::string> carve_by_signature(const std::string& image_path,
 
 } // namespace
 
-#ifdef SQLRECOVER_USE_TSK
-// Filesystem-aware carving via The Sleuth Kit. Walks the image's FS and
-// extracts regular files whose first bytes are the SQLite magic. Keeps the
-// original file paths. Only compiled in when libtsk is available
-// (see CMake USE_TSK option).
-#include <tsk/libtsk.h>
-namespace {
-std::vector<std::string> carve_with_tsk(const std::string& image_path,
-                                        const std::string& out_dir,
-                                        bool verbose);
-}
-#endif
-
 std::vector<std::string> carve_databases(const std::string& image_path,
                                          const std::string& out_dir,
                                          bool verbose,
                                          unsigned workers) {
     fs::create_directories(out_dir);
-#ifdef SQLRECOVER_USE_TSK
-    try {
-        auto paths = carve_with_tsk(image_path, out_dir, verbose);
-        if (!paths.empty()) return paths;
-        if (verbose)
-            std::cerr << "[*] tsk found no databases; falling back to carving\n";
-    } catch (const std::exception& e) {
-        if (verbose)
-            std::cerr << "[*] tsk failed (" << e.what()
-                      << "); falling back to signature carving\n";
-    }
-#endif
     return carve_by_signature(image_path, out_dir, verbose, workers);
 }
 

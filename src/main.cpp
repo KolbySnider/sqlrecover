@@ -36,7 +36,7 @@ constexpr const char* kUsage =
 "\n"
 "options:\n"
 "  --image              treat input as a raw partition image; carve .db files\n"
-"                       out of it (libtsk if built with -DUSE_TSK, else carve)\n"
+"                       out of it by signature\n"
 "  --carve-files        also carve generic files (jpeg/png/gif/bmp/pdf/mp4/wav)\n"
 "                       out of the image by signature; only with --image\n"
 "  --wal <path>         explicit -wal file (default: <input>-wal if present)\n"

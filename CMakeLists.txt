@@ -39,17 +39,4 @@ target_include_directories(sqlrecover PRIVATE
 find_package(Threads REQUIRED)
 target_link_libraries(sqlrecover PRIVATE Threads::Threads)
 
-# Optional: physical-image carving via The Sleuth Kit. Enable with -DUSE_TSK=ON.
-# When on, the --image path can carve .db files out of a raw EXT4/F2FS image.
-option(USE_TSK "Link libtsk for raw image carving" OFF)
-if(USE_TSK)
-    find_library(TSK_LIB tsk)
-    if(TSK_LIB)
-        target_compile_definitions(sqlrecover PRIVATE SQLRECOVER_USE_TSK=1)
-        target_link_libraries(sqlrecover PRIVATE ${TSK_LIB})
-    else()
-        message(WARNING "USE_TSK requested but libtsk not found; building without it")
-    endif()
-endif()
-
 install(TARGETS sqlrecover RUNTIME DESTINATION bin)

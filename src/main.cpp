@@ -1,15 +1,15 @@
-#include "database.hpp"
-#include "btree.hpp"
-#include "recover.hpp"
-#include "wal.hpp"
-#include "schema.hpp"
-#include "artifact.hpp"
+#include "format/database.hpp"
+#include "format/btree.hpp"
+#include "recovery/recover.hpp"
+#include "format/wal.hpp"
+#include "format/schema.hpp"
+#include "artifact/artifact.hpp"
 #include "output.hpp"
-#include "timeline.hpp"
-#include "image.hpp"
-#include "filecarve.hpp"
-#include "util.hpp"
-#include "parallel.hpp"
+#include "artifact/timeline.hpp"
+#include "carve/image.hpp"
+#include "carve/filecarve.hpp"
+#include "core/util.hpp"
+#include "recovery/parallel.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -68,7 +68,7 @@ struct Args {
     bool image = false;
     bool timeline = false;
     bool carve_files = false;
-    unsigned    jobs = 0; ///< 0 = auto (hardware_concurrency)
+    unsigned    jobs = 0; // 0 = auto (hardware_concurrency)
 };
 
 using LogFn = std::function<void(const std::string&)>;
@@ -206,7 +206,7 @@ struct SlackTask {
 /// @param args Run configuration (WAL override, --image mode).
 /// @param log Verbose-mode progress logger.
 /// @return Populated outcome; failed is set and error explains why if
-///         anything went wrong.
+/// anything went wrong.
 DbOutcome process_db(const std::string& db_path, const Args& args, const LogFn& log) {
     DbOutcome res;
     try {
@@ -275,7 +275,7 @@ DbOutcome process_db(const std::string& db_path, const Args& args, const LogFn& 
 /// in db order afterward, so output doesn't depend on chunk size or
 /// worker count.
 /// @param[in,out] results Phase-1 outcomes; residual and slack_n are
-///                        extended in place. Failed entries are skipped.
+/// extended in place. Failed entries are skipped.
 /// @param want_jobs Worker threads to use for the scan.
 void run_slack_scan(std::vector<DbOutcome>& results, unsigned want_jobs) {
     constexpr uint64_t kBytesPerChunk = 16ull * 1024 * 1024;
@@ -326,7 +326,7 @@ void run_slack_scan(std::vector<DbOutcome>& results, unsigned want_jobs) {
 /// @param log Verbose-mode progress logger.
 /// @param[out] out Aggregated records for the main output dump.
 /// @param[out] tl_records Aggregated records for --timeline, live and
-///                        recovered mixed, regardless of --live.
+/// recovered mixed, regardless of --live.
 /// @param[out] sum Running totals; input_file must already be set.
 void aggregate_results(std::vector<DbOutcome>& results,
                        const std::vector<std::string>& db_paths,
@@ -374,7 +374,7 @@ void aggregate_results(std::vector<DbOutcome>& results,
 /// @param args Run configuration.
 /// @param[in,out] out Aggregated records; filtered by --table in place.
 /// @param[in,out] sum Running totals; suspect/artifact/file counts are
-///                    filled in here from the final record set.
+/// filled in here from the final record set.
 /// @param recovered_files Files carved by --carve-files, if any.
 /// @param tl_records Records to build the --timeline from, if requested.
 /// @param want_jobs Worker threads for output formatting.

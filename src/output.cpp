@@ -1,6 +1,6 @@
 #include "output.hpp"
-#include "parallel.hpp"
-#include "../third_party/json.hpp"
+#include "recovery/parallel.hpp"
+#include "json.hpp"
 #include <iomanip>
 #include <sstream>
 #include <functional>
@@ -97,7 +97,7 @@ std::string value_to_cell(const Value& v) {
 /// @brief Quote and escape a string for use as a CSV field.
 /// @param s Raw cell content.
 /// @return s as-is when it has no special chars, otherwise wrapped in
-///         double quotes with embedded quotes doubled.
+/// double quotes with embedded quotes doubled.
 std::string csv_escape(const std::string& s) {
     bool needs = s.find_first_of(",\"\n\r") != std::string::npos;
     if (!needs) return s;
@@ -118,8 +118,7 @@ std::string csv_escape(const std::string& s) {
 /// @param records Records to format.
 /// @param workers Worker threads to use. At least 1.
 /// @param format_one Appends one record's rendering (given its global
-///                   index, for formats that need to know the last
-///                   record) to a buffer.
+/// index, for formats that need to know the last record) to a buffer.
 void write_parallel(std::ostream& os, const std::vector<Record>& records,
                     unsigned workers,
                     const std::function<void(const Record&, size_t, std::string&)>& format_one) {
@@ -143,7 +142,7 @@ void write_parallel(std::ostream& os, const std::vector<Record>& records,
 } // namespace
 
 /// @brief Build a JSON node for one record. Shared between write_json
-/// (which collects them into an array) and write_json_one (which emits one
+/// (which collects them into an array) and write_jsonl (which emits one
 /// per line).
 /// @param r Record to render.
 /// @return A nlohmann::json object describing r.

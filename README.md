@@ -1,40 +1,38 @@
 # sqlrecover
 
-A command-line forensic tool that recovers deleted records from SQLite
-databases. SQLite is the storage format behind most Android application data:
-SMS, contacts, chat apps, browser history, and so on.
+Command-line tool that recovers deleted records from SQLite databases.
+SQLite backs most of the data on an Android device (SMS, contacts, chat
+apps, browser history), so that's mostly what this is aimed at.
 
-When SQLite deletes a row, its bytes usually stay on disk until the space gets
-reused, but the library stops exposing them. `sqlrecover` parses the SQLite file
-format directly rather than linking `libsqlite3`, so it can read the residual
-data the library no longer shows.
+When SQLite deletes a row, the bytes usually just sit there until something
+overwrites them. The library just stops showing them to you. sqlrecover
+parses the file format itself instead of linking libsqlite3, so it can read
+what's still physically on disk.
 
 ## What it recovers
 
-| Source | What it is | Origin tag |
-|---|---|---|
-| Live B-tree cells | Reachable, current rows (with `--live`) | `live` |
-| Freelist pages | Whole pages returned to the free pool, content intact | `freelist` |
-| Freeblocks & slack | Deleted cells lingering inside leaf pages | `slack` |
-| WAL frames | Prior versions of rows from the write-ahead log | `wal_prior` |
+- **Live B-tree cells** (with `--live`): reachable, current rows. Origin tag `live`.
+- **Freelist pages**: whole pages SQLite returned to the free pool without zeroing. Origin tag `freelist`.
+- **Freeblocks & slack**: deleted cells still sitting inside leaf pages. Origin tag `slack`.
+- **WAL frames**: prior versions of rows from the write-ahead log. Origin tag `wal_prior`.
 
-Every recovered record carries full provenance: source file, origin, page
-number, byte offset, and (for WAL hits) the frame index. In forensic work, where
-a byte came from matters as much as the byte itself.
+Every record keeps its provenance: source file, origin, page number, byte
+offset, and (for WAL hits) the frame index. In this kind of work, where a
+byte came from matters about as much as the byte itself.
 
-With `--image`, the input can be a raw partition image instead of a single
-`.db` file: `sqlrecover` carves every SQLite database out of it by signature
-first, then runs the normal pipeline on each. Adding `--carve-files` also
-carves plain deleted files (JPEG, PNG, GIF, BMP, PDF, MP4/MOV, WAV) out of the
-same image by their file-type signatures.
+`--image` lets the input be a raw partition image instead of a single `.db`
+file. sqlrecover carves out every SQLite database by signature first, then
+runs the normal pipeline on each one. `--carve-files` additionally carves
+plain deleted files (JPEG, PNG, GIF, BMP, PDF, MP4/MOV, WAV) out of the same
+image by their file-type signatures.
 
 ## Known-artifact recognition
 
-Records recovered from slack space or the WAL come back as anonymous arrays of
-typed values, since a deleted row has no `CREATE TABLE` attached to it.
-`sqlrecover` matches each record against a built-in catalog of known Android
-schemas by type fingerprint, turning a recovered row into a labelled artifact
-with named columns:
+Rows recovered from slack space or the WAL come back as anonymous arrays of
+typed values. A deleted row doesn't have a `CREATE TABLE` sitting next to
+it. sqlrecover matches each one against a built-in catalog of Android
+schemas by type fingerprint, so instead of a value array you get something
+like:
 
 ```json
 {
@@ -50,21 +48,21 @@ with named columns:
 }
 ```
 
-The catalog currently covers SMS (`android_sms`, plus the GMS-messaging
+Right now the catalog covers SMS (`android_sms`, plus the GMS-messaging
 variant `android_sms_gms`), MMS (`android_mms`), call log (`android_calllog`),
 contacts (`android_contact`), browser history (`android_browser_history`),
 MediaStore images (`android_media_images`), and WhatsApp messages
-(`android_whatsapp_message`). Matching tolerates NULL columns, which are
-routine on Android, and requires at least two type-constrained columns to
-agree before it labels anything, so it won't tag noise. Adding a new artifact
-takes a few lines in `src/artifact.cpp`.
+(`android_whatsapp_message`). Matching tolerates NULL columns (routine on
+Android) and needs at least two type-constrained columns to agree before it
+labels anything, so it doesn't tag noise. Adding an artifact is a few lines
+in `src/artifact/artifact.cpp`.
 
 ### Field decoding
 
-Matched artifacts also get their fields decoded into readable values, while the
-raw values are kept. Android stores timestamps as milliseconds since the Unix
-epoch and encodes message and call kinds as integers; the decoder turns these
-into ISO-8601 UTC times, enum labels, and formatted durations:
+Matched artifacts also get their fields decoded into something readable,
+while the raw values stick around too. Android stores timestamps as
+milliseconds since the epoch and message/call kinds as bare integers, so
+the decoder turns those into ISO-8601 UTC and enum labels:
 
 ```json
 {
@@ -76,18 +74,15 @@ into ISO-8601 UTC times, enum labels, and formatted durations:
 }
 ```
 
-Decoders handle epoch-millis and epoch-seconds timestamps, call-type and
-SMS-type enums, boolean flags, and durations. The timestamp decoder
-range-checks its input (roughly 1990 to 2100) so an ordinary integer column
-doesn't get dressed up as a date, and unknown enum codes are left alone rather
-than guessed at.
+Covers epoch-millis/epoch-seconds timestamps, call-type and SMS-type enums,
+bool flags, and durations. The timestamp decoder range-checks its input
+(roughly 1990 to 2100) so a random integer column doesn't get dressed up as
+a date. Codes it doesn't recognize get left alone instead of guessed at.
 
 ## Cross-artifact timeline
 
-With `--timeline`, the tool merges every dated event (SMS and calls, live and
-recovered) into a single chronological view. Instead of a per-table dump, you
-get the device's activity in order, with deleted and modified events slotted
-into place and flagged.
+`--timeline` merges every dated event (SMS, calls, live and recovered) into
+one chronological view instead of a per-table dump:
 
 ```
 2023-11-14T22:14:03Z  [R] android_sms      +15550000043  sent  text message number 43…
@@ -95,28 +90,25 @@ into place and flagged.
 2023-11-14T22:13:30Z      android_calllog  missed    +15550000002  14s
 ```
 
-`[R]` marks events recovered from slack space, the freelist, or prior WAL
-versions, i.e. data that isn't visible in the live database. Output is written
-to both `timeline.txt` (human-readable) and `timeline.json` (each event with its
-provenance). Events that appear both live and as a WAL prior version are
-collapsed, keeping the live copy. Timestamps are UTC; see the note below.
+`[R]` means recovered from slack, the freelist, or a prior WAL version, i.e.
+data no longer visible in the live database. Written to both `timeline.txt`
+and `timeline.json` (the latter with full provenance). Events that show up
+both live and as a WAL prior version get collapsed, keeping the live copy.
 
-> **Timezone note:** Android stores timestamps in UTC, and that's what the
-> timeline emits, which is the right canonical form for evidence. A device
-> *displays* times in its local timezone, so when correlating against
-> screenshots you'll need to apply the device's offset.
+Timestamps are UTC, since that's what Android stores. If you're
+cross-referencing against screenshots or anything else showing local time,
+remember to apply the device's offset.
 
 ## Building
 
-Requires a C++20 compiler and CMake 3.16+.
+C++20 compiler, CMake 3.16+.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-Raw-image support (`--image`) uses signature carving and needs no external
-dependencies.
+No external deps. Signature carving for `--image` is all hand-rolled too.
 
 ## Usage
 
@@ -139,82 +131,81 @@ sqlrecover <input.db> [options]
   -h, --help           show help
 ```
 
-Exit codes: `0` success, `1` parse error, `2` bad arguments. stdout is reserved
-for clean machine-readable data; progress and reports go to stderr.
+Exit codes: `0` ok, `1` parse error, `2` bad arguments. stdout is just the
+clean machine-readable data; progress and reports go to stderr.
 
 ### Examples
 
-Recover deleted rows from an extracted database and its WAL sidecar:
-
 ```sh
+# deleted rows from an extracted db + its WAL sidecar
 sqlrecover messages.db --report
-```
 
-Carve and analyse every database in a raw image, as CSV:
-
-```sh
+# carve and analyse every database in a raw image, as CSV
 sqlrecover userdata.img --image --format csv --output ./case01
-```
 
-Only the recovered contacts, including live rows for comparison:
-
-```sh
+# recovered contacts only, plus live rows for comparison
 sqlrecover contacts2.db --live --table contacts
 ```
 
 ## How it works
 
 A SQLite database is a sequence of fixed-size pages. Table rows live in the
-cells of B-tree leaf pages; each cell is a length-prefixed *record* whose header
-lists one serial type per column. `sqlrecover`:
+cells of B-tree leaf pages, and each cell is a length-prefixed record whose
+header lists one serial type per column. Roughly:
 
-1. Parses the 100-byte database header (page size, encoding, freelist root).
-2. Walks each table's B-tree from the roots named in `sqlite_master`, decoding
-   live records and following overflow pages so large values are reassembled.
-3. Recovers residual data three ways: scanning freelist pages, walking the
-   freeblock chain and unallocated gap inside each leaf page, and reconstructing
-   prior row versions from WAL frames.
-4. Decodes each record's serial-type body into typed values and emits them with
-   provenance as JSON or CSV, plus an optional summary report.
+1. Parse the 100-byte database header (page size, encoding, freelist root).
+2. Walk each table's B-tree from the roots named in `sqlite_master`, decoding
+   live records and following overflow pages so big TEXT/BLOB values come
+   back whole.
+3. Recover residual data three ways: scan freelist pages, walk the freeblock
+   chain and unallocated gap inside each leaf page, and reconstruct prior row
+   versions from WAL frames.
+4. Decode each record's serial-type body into typed values and emit them with
+   provenance, plus an optional summary report.
 
-Residual recovery is heuristic by nature: overwritten or coalesced freeblocks
-yield partial rows. The tool keeps weak matches but flags them `suspect` instead
-of dropping them, leaving triage to the examiner. Recovered text that isn't
-valid UTF-8 is preserved as hex (`$text_raw` / `0x…`) so nothing is silently
-lost and the output never corrupts.
+Residual recovery is heuristic. Overwritten or coalesced freeblocks
+sometimes give you partial rows. Weak matches get kept but flagged
+`suspect` rather than thrown away, so triage is up to you. Recovered text
+that isn't valid UTF-8 comes back as hex (`$text_raw` / `0x…`) instead of
+getting mangled or dropped.
 
 ## Project layout
 
 ```
-include/              public headers, one per module
-src/                  implementations + main.cpp (CLI orchestration)
+include/, src/
+  core/       byte-level primitives: types, util, varint, serial decoding
+  format/     SQLite file-format model: mapped file, pages, database, btree, schema, WAL
+  recovery/   the recovery pipeline: freelist/slack/WAL scanning, thread pool
+  artifact/   known-schema recognition + cross-artifact timeline
+  carve/      raw-image carving: database and generic file signatures
+  main.cpp, output.hpp/.cpp   CLI orchestration + result formatting (top-level)
 third_party/json.hpp  vendored nlohmann/json
 tests/                ground-truth corpus generator + smoke test
 ```
 
 ## Testing
 
-`tests/make_corpus.py` builds a database with a *known* set of deleted rows
-(using `secure_delete=OFF`, Android's default, so freed bytes survive) and an
-uncheckpointed WAL. `tests/smoke_test.sh` runs the tool against it and checks
-that genuinely-deleted rows are recovered with zero false positives:
+`tests/make_corpus.py` builds a database with a known set of deleted rows
+(`secure_delete=OFF`, Android's default, so freed bytes actually survive)
+plus an uncheckpointed WAL. `tests/smoke_test.sh` runs the tool against it
+and checks the genuinely-deleted rows come back with zero false positives:
 
 ```sh
 ./tests/smoke_test.sh ./build/sqlrecover
 ```
 
-`tests/make_android_corpus.py` builds a second corpus using authentic Android
-schemas (`sms`, `calls`), and `tests/artifact_test.sh` checks that recovered and
-live records are correctly recognised as `android_sms` / `android_calllog` with
-named columns, and that recovered deleted messages are genuine deletions:
+`tests/make_android_corpus.py` builds a second corpus with real Android
+schemas (`sms`, `calls`); `tests/artifact_test.sh` checks that recovered and
+live records get recognised as `android_sms` / `android_calllog` with named
+columns, and that the recovered deleted messages are actual deletions:
 
 ```sh
 ./tests/artifact_test.sh ./build/sqlrecover
 ```
 
-`tests/timeline_test.sh` runs `--timeline` against the same corpus and checks
-that the merged timeline is chronologically sorted, genuinely cross-artifact,
-and flags recovered events that match known deletions:
+`tests/timeline_test.sh` runs `--timeline` against the same corpus and
+checks the merged timeline is sorted, actually cross-artifact, and flags
+recovered events that match known deletions:
 
 ```sh
 ./tests/timeline_test.sh ./build/sqlrecover
@@ -222,10 +213,11 @@ and flags recovered events that match known deletions:
 
 ## Scope & limitations
 
-- Table B-trees only; index B-trees are skipped (no row data there).
-- WITHOUT ROWID tables decode as ordinary records (no rowid surfaced).
-- Signature carving recovers contiguous databases; fragmented files won't
-  carve cleanly.
-- This is a learning/portfolio tool, not a validated evidentiary instrument.
-  Treat recovered data, especially `suspect` rows, as leads to verify rather
-  than proof.
+Table B-trees only; index B-trees don't hold row data so they're skipped.
+WITHOUT ROWID tables decode fine but without a rowid surfaced. Signature
+carving only gets contiguous databases, so a fragmented one won't carve
+cleanly.
+
+And to be upfront about it: this started as a learning/portfolio project,
+not a validated evidentiary tool. Treat what it recovers, `suspect` rows
+especially, as leads to go verify rather than as proof of anything.

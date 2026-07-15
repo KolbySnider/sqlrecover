@@ -13,21 +13,21 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 
 add_executable(sqlrecover
     src/main.cpp
-    src/util.cpp
-    src/varint.cpp
-    src/serial.cpp
-    src/page.cpp
-    src/mapped_file.cpp
-    src/database.cpp
-    src/btree.cpp
-    src/schema.cpp
-    src/artifact.cpp
-    src/timeline.cpp
-    src/recover.cpp
-    src/wal.cpp
     src/output.cpp
-    src/image.cpp
-    src/filecarve.cpp
+    src/core/util.cpp
+    src/core/varint.cpp
+    src/core/serial.cpp
+    src/format/page.cpp
+    src/format/mapped_file.cpp
+    src/format/database.cpp
+    src/format/btree.cpp
+    src/format/schema.cpp
+    src/format/wal.cpp
+    src/recovery/recover.cpp
+    src/artifact/artifact.cpp
+    src/artifact/timeline.cpp
+    src/carve/image.cpp
+    src/carve/filecarve.cpp
 )
 
 target_include_directories(sqlrecover PRIVATE

@@ -7,8 +7,8 @@
 #include <string>
 #include <map>
 #include <ostream>
-#include "types.hpp"
-#include "filecarve.hpp"
+#include "core/types.hpp"
+#include "carve/filecarve.hpp"
 
 namespace sqlrecover {
 
@@ -33,8 +33,6 @@ struct RunSummary {
 /// blob hex-encoding, JSON escaping) is parallelized across `workers`
 /// threads; the actual write to `os` stays sequential and in original
 /// record order.
-/// @param[out] os Stream to write to.
-/// @param records Records to dump.
 /// @param workers Worker threads for formatting. At least 1.
 void write_json(std::ostream& os, const std::vector<Record>& records,
                 unsigned workers = 1);
@@ -46,20 +44,13 @@ void write_jsonl(std::ostream& os, const std::vector<Record>& records,
 
 /// @brief Write records as CSV. Same parallel-formatting approach as
 /// write_json.
-/// @param[out] os Stream to write to.
-/// @param records Records to dump.
-/// @param workers Worker threads for formatting. At least 1.
 void write_csv(std::ostream& os, const std::vector<Record>& records,
               unsigned workers = 1);
 
 /// @brief Write a human-readable summary report.
-/// @param[out] os Stream to write to.
-/// @param s Aggregated counts for the run.
 void write_report(std::ostream& os, const RunSummary& s);
 
 /// @brief Write the --carve-files manifest as a JSON array.
-/// @param[out] os Stream to write to.
-/// @param files Recovered files to list.
 void write_recovered_files_json(std::ostream& os, const std::vector<RecoveredFile>& files);
 
 } // namespace sqlrecover

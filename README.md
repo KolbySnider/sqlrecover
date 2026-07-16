@@ -2,7 +2,7 @@
 
 Command-line tool that recovers deleted records from SQLite databases.
 SQLite backs most of the data on an Android device (SMS, contacts, chat
-apps, browser history), so that's mostly what this is aimed at.
+apps, browser history).
 
 When SQLite deletes a row, the bytes usually just sit there until something
 overwrites them. The library just stops showing them to you. sqlrecover
